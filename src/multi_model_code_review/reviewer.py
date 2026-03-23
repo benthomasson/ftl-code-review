@@ -165,6 +165,7 @@ CHANGE_PATTERN = re.compile(
     r"VERDICT:\s*(PASS|CONCERN|BLOCK)\s*\n"
     r"(?:CORRECTNESS:\s*(\w+)\s*\n)?"
     r"(?:SPEC_COMPLIANCE:\s*([^\n]+)\s*\n)?"
+    r"(?:ISSUE_COMPLIANCE:\s*([^\n]+)\s*\n)?"
     r"(?:BELIEF_COMPLIANCE:\s*([^\n]+)\s*\n)?"
     r"(?:TEST_COVERAGE:\s*(\w+)\s*\n)?"
     r"(?:INTEGRATION:\s*(\w+)\s*\n)?"
@@ -275,10 +276,11 @@ def parse_review_response(model: str, response: str) -> ModelReview:
         verdict = parse_verdict(match.group(2))
         correctness = parse_correctness(match.group(3)) if match.group(3) else None
         spec_compliance = parse_spec_compliance(match.group(4)) if match.group(4) else None
-        belief_compliance = match.group(5).strip() if match.group(5) else None
-        test_coverage = parse_test_coverage(match.group(6)) if match.group(6) else None
-        integration = parse_integration(match.group(7)) if match.group(7) else None
-        reasoning = match.group(8).strip() if match.group(8) else ""
+        # group 5 is ISSUE_COMPLIANCE (not stored on ChangeVerdict)
+        belief_compliance = match.group(6).strip() if match.group(6) else None
+        test_coverage = parse_test_coverage(match.group(7)) if match.group(7) else None
+        integration = parse_integration(match.group(8)) if match.group(8) else None
+        reasoning = match.group(9).strip() if match.group(9) else ""
 
         # Append belief compliance info to reasoning if present
         if belief_compliance and belief_compliance.upper() not in ("N/A", "CONSISTENT"):

@@ -284,6 +284,27 @@ REASONING: Broken.
         assert len(result.changes) == 1
         assert result.changes[0].verdict == Verdict.PASS
 
+    def test_issue_compliance_field_parsed(self):
+        """ISSUE_COMPLIANCE field between SPEC and BELIEF should not break parsing."""
+        response = """### src/fix.py
+VERDICT: PASS
+CORRECTNESS: VALID
+SPEC_COMPLIANCE: N/A
+ISSUE_COMPLIANCE: ADDRESSES
+BELIEF_COMPLIANCE: CONSISTENT
+TEST_COVERAGE: COVERED
+INTEGRATION: WIRED
+REASONING: The fix correctly addresses the issue.
+---
+"""
+        result = parse_review_response("test", response)
+        assert result.gate == Verdict.PASS
+        assert len(result.changes) == 1
+        assert result.changes[0].verdict == Verdict.PASS
+        assert result.changes[0].correctness == Correctness.VALID
+        assert result.changes[0].test_coverage == TestCoverage.COVERED
+        assert result.changes[0].integration == Integration.WIRED
+
     def test_raw_response_preserved(self):
         result = parse_review_response("claude", SAMPLE_CLAUDE_RESPONSE)
         assert result.raw_response == SAMPLE_CLAUDE_RESPONSE
