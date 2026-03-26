@@ -20,7 +20,8 @@ Do NOT render verdicts yet. Only request observations.
 | `exception_hierarchy` | Show exception MRO and subclasses | Retry logic, exception handling |
 | `raises_analysis` | What exceptions a function raises | New function calls, error paths |
 | `call_graph` | What a function calls | Impact analysis |
-| `find_usages` | Where a symbol is used | Integration verification |
+| `find_usages` | Where a symbol is used (with prod/test split) | Quick integration lookup |
+| `find_callers` | Caller analysis with prod/test split and calling context | Method signature changes, return type changes, constructor modifications, integration verification |
 | `test_coverage` | Find tests for a file (uses coverage-map if available) | Test coverage claims |
 | `coverage_map_tests` | Find tests covering a file (from coverage-map.json) | Precise test coverage from actual execution |
 | `coverage_map_files` | Find files covered by tests matching a pattern | Impact analysis for test changes |
@@ -74,6 +75,13 @@ For a diff modifying a method but you need the full function to verify:
 ```json
 [
   {{"name": "full_getattr", "tool": "function_body", "params": {{"file_path": "src/proxy.py", "function_name": "__getattr__"}}}}
+]
+```
+
+For a diff changing a method signature or return type (verify all callers):
+```json
+[
+  {{"name": "handle_request_callers", "tool": "find_callers", "params": {{"symbol": "handle_request"}}}}
 ]
 ```
 

@@ -27,6 +27,47 @@ from pathlib import Path
 from typing import Any
 
 
+def is_test_file(file_path: str) -> bool:
+    """Classify whether a file path belongs to test code.
+
+    Checks filename patterns and path components commonly used for tests.
+
+    Args:
+        file_path: Relative or absolute file path.
+
+    Returns:
+        True if the file is a test file, False otherwise.
+
+    Examples:
+        >>> is_test_file("tests/test_foo.py")
+        True
+        >>> is_test_file("src/auth/client.py")
+        False
+        >>> is_test_file("test/unit/bar_test.py")
+        True
+        >>> is_test_file("conftest.py")
+        True
+    """
+    from pathlib import PurePosixPath
+
+    path = PurePosixPath(file_path)
+    basename = path.name
+
+    # Filename patterns
+    if basename.startswith("test_") or basename.endswith("_test.py"):
+        return True
+    if basename == "conftest.py":
+        return True
+
+    # Path component patterns
+    test_dirs = {"tests", "test", "testing"}
+    for part in path.parts:
+        if part in test_dirs:
+            return True
+
+    return False
+
+
 async def exception_hierarchy(class_name: str, repo_path: str | None = None) -> dict[str, Any]:
     """
     Show exception class hierarchy (MRO and subclasses).
@@ -272,20 +313,181 @@ async def find_usages(symbol: str, repo_path: str) -> dict[str, Any]:
             return {"error": "grep timed out", "symbol": symbol}
 
         usages = []
+        production_usages = []
+        test_usages = []
         for line in stdout.decode().strip().split("\n"):
             if line and ":" in line:
                 parts = line.split(":", 2)
                 if len(parts) >= 3:
-                    usages.append({
-                        "file": parts[0].replace(repo_path + "/", ""),
+                    rel_file = parts[0].replace(repo_path + "/", "")
+                    entry = {
+                        "file": rel_file,
                         "line": int(parts[1]),
                         "text": parts[2].strip()[:100],
-                    })
+                    }
+                    usages.append(entry)
+                    if is_test_file(rel_file):
+                        test_usages.append(entry)
+                    else:
+                        production_usages.append(entry)
 
         return {
             "symbol": symbol,
-            "usages": usages[:30],  # Limit results
+            "usages": usages[:30],  # Limit results (backward compat)
+            "production_usages": production_usages[:30],
+            "test_usages": test_usages[:30],
+            "production_count": len(production_usages),
+            "test_count": len(test_usages),
             "total_count": len(usages),
+        }
+    except Exception as e:
+        return {"error": str(e), "symbol": symbol}
+
+
+def _extract_enclosing_function(
+    file_lines: list[str], match_line: int, context_lines: int = 3
+) -> dict[str, Any]:
+    """Find the enclosing function/method for a given line number.
+
+    Walks backwards from match_line to find the nearest ``def`` or ``class``
+    statement. Returns the enclosing scope name and surrounding context.
+
+    Args:
+        file_lines: All lines of the file (0-indexed list).
+        match_line: 1-based line number of the match.
+        context_lines: Number of lines to show before and after the match.
+
+    Returns:
+        Dict with ``context_function`` (name or None) and ``context_snippet``
+        (surrounding lines as a string).
+    """
+    import re
+
+    idx = match_line - 1  # convert to 0-based
+    if idx < 0 or idx >= len(file_lines):
+        return {"context_function": None, "context_snippet": ""}
+
+    # Walk backwards to find enclosing def/class
+    func_name = None
+    for i in range(idx - 1, -1, -1):
+        stripped = file_lines[i].lstrip()
+        m = re.match(r"(?:async\s+)?def\s+(\w+)", stripped)
+        if m:
+            func_name = m.group(1)
+            break
+        m = re.match(r"class\s+(\w+)", stripped)
+        if m:
+            func_name = f"{m.group(1)} (class)"
+            break
+
+    # Extract surrounding context
+    start = max(0, idx - context_lines)
+    end = min(len(file_lines), idx + context_lines + 1)
+    snippet_lines = []
+    for i in range(start, end):
+        prefix = ">> " if i == idx else "   "
+        snippet_lines.append(f"{prefix}{i + 1}: {file_lines[i]}")
+
+    return {
+        "context_function": func_name,
+        "context_snippet": "\n".join(snippet_lines),
+    }
+
+
+async def find_callers(
+    symbol: str, repo_path: str, include_context: bool = True
+) -> dict[str, Any]:
+    """Find callers of a symbol with production/test separation and calling context.
+
+    Combines usage finding with caller classification and enclosing function
+    extraction. Purpose-built for integration verification during code review.
+
+    Args:
+        symbol: Function, method, or class name to search for.
+        repo_path: Repository path to search in.
+        include_context: Whether to extract enclosing function context for each
+            call site. Defaults to True.
+
+    Returns:
+        Dict with ``production_callers`` and ``test_callers`` lists, each entry
+        containing file, line, text, and optionally context_function and
+        context_snippet fields. Also includes counts and the symbol searched.
+
+    Example::
+
+        >>> import asyncio
+        >>> result = asyncio.run(find_callers("handle_request", "/path/to/repo"))
+        >>> for caller in result["production_callers"]:
+        ...     print(caller["context_function"], caller["file"], caller["line"])
+    """
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "grep", "-Frn", "--include=*.py", symbol, repo_path,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        try:
+            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=30)
+        except asyncio.TimeoutError:
+            proc.kill()
+            return {"error": "grep timed out", "symbol": symbol}
+
+        production_callers: list[dict[str, Any]] = []
+        test_callers: list[dict[str, Any]] = []
+        file_cache: dict[str, list[str]] = {}
+        context_count = 0
+        max_context = 20
+
+        for line in stdout.decode().strip().split("\n"):
+            if not line or ":" not in line:
+                continue
+            parts = line.split(":", 2)
+            if len(parts) < 3:
+                continue
+
+            rel_file = parts[0].replace(repo_path + "/", "")
+            line_no = int(parts[1])
+            text = parts[2].strip()[:100]
+
+            entry: dict[str, Any] = {
+                "file": rel_file,
+                "line": line_no,
+                "text": text,
+            }
+
+            # Add calling context if requested (up to max_context entries)
+            if include_context and context_count < max_context:
+                abs_path = parts[0]
+                if abs_path not in file_cache:
+                    try:
+                        file_content = Path(abs_path).read_text()
+                        file_lines = file_content.splitlines()
+                        # Skip very large files
+                        if len(file_lines) <= 5000:
+                            file_cache[abs_path] = file_lines
+                    except Exception:
+                        pass
+
+                if abs_path in file_cache:
+                    ctx = _extract_enclosing_function(
+                        file_cache[abs_path], line_no
+                    )
+                    entry["context_function"] = ctx["context_function"]
+                    entry["context_snippet"] = ctx["context_snippet"]
+                    context_count += 1
+
+            if is_test_file(rel_file):
+                test_callers.append(entry)
+            else:
+                production_callers.append(entry)
+
+        return {
+            "symbol": symbol,
+            "production_callers": production_callers[:30],
+            "test_callers": test_callers[:30],
+            "production_count": len(production_callers),
+            "test_count": len(test_callers),
+            "total_count": len(production_callers) + len(test_callers),
         }
     except Exception as e:
         return {"error": str(e), "symbol": symbol}
@@ -1375,6 +1577,7 @@ OBSERVATION_TOOLS: dict[str, Any] = {
     "raises_analysis": raises_analysis,
     "call_graph": call_graph,
     "find_usages": find_usages,
+    "find_callers": find_callers,
     "git_blame": git_blame,
     "test_coverage": test_coverage,
     "coverage_map_tests": coverage_map_tests,
