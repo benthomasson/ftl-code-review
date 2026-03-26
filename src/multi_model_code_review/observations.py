@@ -68,6 +68,35 @@ def is_test_file(file_path: str) -> bool:
     return False
 
 
+def _find_similar_files(filename: str, repo_path: str) -> list[str]:
+    """Search repo for files with the same name when a path doesn't resolve.
+
+    Used as a fallback when an observation tool receives a file path that
+    doesn't exist — e.g. the file was moved or renamed.
+
+    Args:
+        filename: The basename to search for (e.g. ``"client.py"``).
+        repo_path: Repository root to search within.
+
+    Returns:
+        Sorted list of relative paths matching *filename* under *repo_path*.
+
+    Example::
+
+        >>> _find_similar_files("client.py", "/repo")
+        ['src/new_path/client.py', 'lib/client.py']
+    """
+    matches: list[str] = []
+    repo = Path(repo_path)
+    for match in repo.rglob(filename):
+        # Skip hidden dirs, __pycache__, .git, etc.
+        parts = match.relative_to(repo).parts
+        if any(p.startswith(".") or p == "__pycache__" for p in parts):
+            continue
+        matches.append(str(match.relative_to(repo)))
+    return sorted(matches)
+
+
 async def exception_hierarchy(class_name: str, repo_path: str | None = None) -> dict[str, Any]:
     """
     Show exception class hierarchy (MRO and subclasses).
@@ -226,6 +255,13 @@ async def raises_analysis(file_path: str, function_name: str, repo_path: str | N
             "calls": [],
             "error": f"Function '{function_name}' not found",
         }
+    except FileNotFoundError:
+        result: dict[str, Any] = {"error": f"File not found: {file_path}", "function": function_name}
+        if repo_path:
+            similar = _find_similar_files(Path(file_path).name, repo_path)
+            if similar:
+                result["similar_files"] = similar
+        return result
     except Exception as e:
         return {"error": str(e), "function": function_name}
 
@@ -285,6 +321,13 @@ async def call_graph(file_path: str, function_name: str, repo_path: str | None =
             "file": str(file_path),
             "calls": unique_calls,
         }
+    except FileNotFoundError:
+        result: dict[str, Any] = {"error": f"File not found: {file_path}", "function": function_name}
+        if repo_path:
+            similar = _find_similar_files(Path(file_path).name, repo_path)
+            if similar:
+                result["similar_files"] = similar
+        return result
     except Exception as e:
         return {"error": str(e), "function": function_name}
 
@@ -811,6 +854,17 @@ async def function_body(
             result["total_lines"] = end - start + 1
         return result
 
+    except FileNotFoundError:
+        result: dict[str, Any] = {
+            "error": f"File not found: {file_path}",
+            "file": str(file_path),
+        }
+        if repo_path:
+            basename = Path(file_path).name
+            similar = _find_similar_files(basename, repo_path)
+            if similar:
+                result["similar_files"] = similar
+        return result
     except SyntaxError as e:
         return {"error": f"Syntax error parsing {file_path}: {e}", "file": str(file_path)}
     except Exception as e:
@@ -1516,6 +1570,13 @@ async def file_imports(file_path: str, repo_path: str | None = None) -> dict[str
             "from_imports": from_imports,
             "import_section": "\n".join(import_section_lines),
         }
+    except FileNotFoundError:
+        result: dict[str, Any] = {"error": f"File not found: {file_path}", "file": str(file_path)}
+        if repo_path:
+            similar = _find_similar_files(Path(file_path).name, repo_path)
+            if similar:
+                result["similar_files"] = similar
+        return result
     except Exception as e:
         return {"error": str(e), "file": file_path}
 
@@ -1571,6 +1632,385 @@ async def project_dependencies(repo_path: str) -> dict[str, Any]:
         return {"error": str(e), "repo": repo_path}
 
 
+async def class_hierarchy(
+    class_name: str,
+    file_path: str,
+    repo_path: str,
+) -> dict[str, Any]:
+    """Show base class hierarchy and ``__init__`` signatures for a class.
+
+    AST-based analysis — works on any repo without requiring it to be
+    importable. Given a class, extracts its base classes and resolves their
+    ``__init__`` signatures so the reviewer can verify constructor compatibility
+    after inheritance changes.
+
+    Args:
+        class_name: Name of the class to inspect (e.g. ``"MyClient"``).
+        file_path: Path to the Python file containing the class (relative to
+            *repo_path* or absolute).
+        repo_path: Repository root for resolving relative paths and imports.
+
+    Returns:
+        Dict with ``bases`` (list of base class names), ``own_init_signature``,
+        ``base_init_signatures`` (dict mapping base name to its ``__init__``
+        signature string), and ``mro`` (for multiple inheritance).
+
+    Example::
+
+        >>> import asyncio
+        >>> result = asyncio.run(class_hierarchy("MyClient", "src/client.py", "/repo"))
+        >>> result["bases"]
+        ['BaseClient']
+        >>> result["base_init_signatures"]["BaseClient"]
+        'def __init__(self, host: str, port: int = 443)'
+    """
+    try:
+        if not Path(file_path).is_absolute():
+            full_path = Path(repo_path) / file_path
+        else:
+            full_path = Path(file_path)
+
+        source = full_path.read_text()
+        tree = ast.parse(source)
+
+        # Find the target class
+        target_class: ast.ClassDef | None = None
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ClassDef) and node.name == class_name:
+                target_class = node
+                break
+
+        if target_class is None:
+            return {"error": f"Class '{class_name}' not found in {file_path}", "file": str(file_path)}
+
+        # Extract base class names
+        bases: list[str] = []
+        for base in target_class.bases:
+            if isinstance(base, ast.Name):
+                bases.append(base.id)
+            elif isinstance(base, ast.Attribute):
+                # e.g. module.ClassName
+                parts = []
+                node = base
+                while isinstance(node, ast.Attribute):
+                    parts.append(node.attr)
+                    node = node.value
+                if isinstance(node, ast.Name):
+                    parts.append(node.id)
+                bases.append(".".join(reversed(parts)))
+
+        def _format_signature(func_node: ast.FunctionDef | ast.AsyncFunctionDef) -> str:
+            """Format a function's signature as a string."""
+            args = func_node.args
+            parts: list[str] = []
+            # Positional args
+            num_defaults = len(args.defaults)
+            num_args = len(args.args)
+            for i, arg in enumerate(args.args):
+                s = arg.arg
+                if arg.annotation:
+                    s += f": {ast.unparse(arg.annotation)}"
+                # Check if this arg has a default
+                default_idx = i - (num_args - num_defaults)
+                if default_idx >= 0:
+                    s += f" = {ast.unparse(args.defaults[default_idx])}"
+                parts.append(s)
+            # *args
+            if args.vararg:
+                s = f"*{args.vararg.arg}"
+                if args.vararg.annotation:
+                    s += f": {ast.unparse(args.vararg.annotation)}"
+                parts.append(s)
+            # keyword-only args
+            for i, arg in enumerate(args.kwonlyargs):
+                s = arg.arg
+                if arg.annotation:
+                    s += f": {ast.unparse(arg.annotation)}"
+                if i < len(args.kw_defaults) and args.kw_defaults[i] is not None:
+                    s += f" = {ast.unparse(args.kw_defaults[i])}"
+                parts.append(s)
+            # **kwargs
+            if args.kwarg:
+                s = f"**{args.kwarg.arg}"
+                if args.kwarg.annotation:
+                    s += f": {ast.unparse(args.kwarg.annotation)}"
+                parts.append(s)
+
+            ret = ""
+            if func_node.returns:
+                ret = f" -> {ast.unparse(func_node.returns)}"
+            prefix = "async def" if isinstance(func_node, ast.AsyncFunctionDef) else "def"
+            return f"{prefix} {func_node.name}({', '.join(parts)}){ret}"
+
+        # Extract own __init__ signature
+        own_init: str | None = None
+        for child in ast.iter_child_nodes(target_class):
+            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)) and child.name == "__init__":
+                own_init = _format_signature(child)
+                break
+
+        # Resolve base class imports to find their files
+        import_map: dict[str, str] = {}  # class_name -> module_path
+        for node in ast.iter_child_nodes(tree):
+            if isinstance(node, ast.ImportFrom) and node.module:
+                for alias in node.names:
+                    import_map[alias.name] = node.module
+
+        # Try to find base class __init__ signatures
+        base_init_signatures: dict[str, str | None] = {}
+        for base_name in bases:
+            simple_name = base_name.split(".")[-1]
+            base_init_signatures[base_name] = None
+
+            # Try resolving via imports
+            module = import_map.get(simple_name, "")
+            if module:
+                # Convert dotted module to file path
+                module_path = module.replace(".", "/") + ".py"
+                candidate = Path(repo_path) / module_path
+                # Also try src/ prefix
+                if not candidate.exists():
+                    candidate = Path(repo_path) / "src" / module_path
+                if candidate.exists():
+                    try:
+                        base_source = candidate.read_text()
+                        base_tree = ast.parse(base_source)
+                        for bnode in ast.walk(base_tree):
+                            if isinstance(bnode, ast.ClassDef) and bnode.name == simple_name:
+                                for child in ast.iter_child_nodes(bnode):
+                                    if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)) and child.name == "__init__":
+                                        base_init_signatures[base_name] = _format_signature(child)
+                                        break
+                                break
+                    except Exception:
+                        pass
+
+            # If not resolved via import, try same file
+            if base_init_signatures[base_name] is None:
+                for node in ast.walk(tree):
+                    if isinstance(node, ast.ClassDef) and node.name == simple_name:
+                        for child in ast.iter_child_nodes(node):
+                            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)) and child.name == "__init__":
+                                base_init_signatures[base_name] = _format_signature(child)
+                                break
+                        break
+
+        result: dict[str, Any] = {
+            "class_name": class_name,
+            "file": str(file_path),
+            "bases": bases,
+            "own_init_signature": own_init,
+            "base_init_signatures": base_init_signatures,
+        }
+        if len(bases) > 1:
+            result["multiple_inheritance"] = True
+
+        return result
+
+    except FileNotFoundError:
+        result = {"error": f"File not found: {file_path}", "file": str(file_path)}
+        similar = _find_similar_files(Path(file_path).name, repo_path)
+        if similar:
+            result["similar_files"] = similar
+        return result
+    except Exception as e:
+        return {"error": str(e), "file": str(file_path)}
+
+
+async def symbol_migration(
+    old_name: str,
+    new_name: str | None = None,
+    repo_path: str = "",
+) -> dict[str, Any]:
+    """Check whether a symbol rename has been completed across the repo.
+
+    Greps for remaining uses of *old_name* (and optionally *new_name*) to
+    detect incomplete migrations. Returns a ``migration_complete`` boolean
+    so the reviewer can quickly see whether stale references remain.
+
+    Args:
+        old_name: The old/deprecated symbol name to search for.
+        new_name: The new symbol name (optional). If provided, its usages are
+            also returned so the reviewer can compare adoption.
+        repo_path: Repository root to search in.
+
+    Returns:
+        Dict with ``old_name_usages``, ``new_name_usages`` (if *new_name*
+        provided), ``stale_references`` (production, non-comment usages of
+        old name), and ``migration_complete`` boolean.
+
+    Example::
+
+        >>> import asyncio
+        >>> result = asyncio.run(symbol_migration("OldClient", "NewClient", "/repo"))
+        >>> result["migration_complete"]
+        False
+        >>> result["stale_references"]
+        [{'file': 'src/api.py', 'line': 42, 'text': 'client = OldClient()'}]
+    """
+    if not repo_path:
+        return {"error": "repo_path is required"}
+
+    async def _grep_symbol(symbol: str) -> list[dict[str, Any]]:
+        # Use word-boundary matching to avoid substring false positives
+        # (e.g. searching "Client" shouldn't match "ClientFactory")
+        proc = await asyncio.create_subprocess_exec(
+            "grep", "-wrn", "--include=*.py", symbol, repo_path,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        try:
+            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=30)
+        except asyncio.TimeoutError:
+            proc.kill()
+            return []
+
+        usages: list[dict[str, Any]] = []
+        for line in stdout.decode().strip().split("\n"):
+            if not line or ":" not in line:
+                continue
+            parts = line.split(":", 2)
+            if len(parts) >= 3:
+                rel_file = parts[0].replace(repo_path + "/", "")
+                usages.append({
+                    "file": rel_file,
+                    "line": int(parts[1]),
+                    "text": parts[2].strip()[:100],
+                })
+        return usages
+
+    # Run searches in parallel
+    tasks = [_grep_symbol(old_name)]
+    if new_name:
+        tasks.append(_grep_symbol(new_name))
+
+    results = await asyncio.gather(*tasks)
+    old_usages = results[0]
+    new_usages = results[1] if new_name else []
+
+    # Filter stale references: production code, non-comment lines
+    stale_references: list[dict[str, Any]] = []
+    for usage in old_usages:
+        text = usage["text"].lstrip()
+        if text.startswith("#"):
+            continue
+        if is_test_file(usage["file"]):
+            continue
+        stale_references.append(usage)
+
+    result: dict[str, Any] = {
+        "old_name": old_name,
+        "old_name_usages": old_usages[:30],
+        "old_name_count": len(old_usages),
+        "stale_references": stale_references[:30],
+        "stale_count": len(stale_references),
+        "migration_complete": len(stale_references) == 0,
+    }
+    if new_name:
+        result["new_name"] = new_name
+        result["new_name_usages"] = new_usages[:30]
+        result["new_name_count"] = len(new_usages)
+
+    return result
+
+
+async def generator_info(
+    file_path: str,
+    function_name: str,
+    repo_path: str | None = None,
+) -> dict[str, Any]:
+    """Report whether a function is a generator and key yield metadata.
+
+    Uses AST analysis to detect ``yield`` / ``yield from`` statements and
+    check for ``return <value>`` alongside yields. This affects validation
+    semantics — generators return iterators, not direct values.
+
+    Args:
+        file_path: Path to the Python file (relative to *repo_path* or absolute).
+        function_name: Name of the function to inspect.
+        repo_path: Base path for resolving relative *file_path* values.
+
+    Returns:
+        Dict with ``is_generator``, ``is_async_generator``, ``yield_count``,
+        ``has_return_value``, and ``return_annotation``.
+
+    Example::
+
+        >>> import asyncio
+        >>> result = asyncio.run(generator_info("src/pipeline.py", "process_items"))
+        >>> result["is_generator"]
+        True
+        >>> result["yield_count"]
+        3
+    """
+    try:
+        if repo_path and not Path(file_path).is_absolute():
+            full_path = Path(repo_path) / file_path
+        else:
+            full_path = Path(file_path)
+
+        source = full_path.read_text()
+        tree = ast.parse(source)
+
+        # Find the target function (including methods inside classes)
+        target: ast.FunctionDef | ast.AsyncFunctionDef | None = None
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == function_name:
+                target = node
+                break
+
+        if target is None:
+            return {
+                "error": f"Function '{function_name}' not found",
+                "file": str(file_path),
+            }
+
+        is_async = isinstance(target, ast.AsyncFunctionDef)
+        yield_count = 0
+        has_return_value = False
+
+        # Walk the function body but skip nested function definitions.
+        # ast.walk descends into nested functions, so we use a manual
+        # worklist that prunes nested def subtrees.
+        worklist: list[ast.AST] = list(ast.iter_child_nodes(target))
+        while worklist:
+            child = worklist.pop()
+            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                # Don't descend into nested functions
+                continue
+            if isinstance(child, (ast.Yield, ast.YieldFrom)):
+                yield_count += 1
+            if isinstance(child, ast.Return) and child.value is not None:
+                has_return_value = True
+            worklist.extend(ast.iter_child_nodes(child))
+
+        is_generator = yield_count > 0
+
+        # Extract return annotation
+        return_annotation: str | None = None
+        if target.returns:
+            return_annotation = ast.unparse(target.returns)
+
+        return {
+            "function": function_name,
+            "file": str(file_path),
+            "is_generator": is_generator and not is_async,
+            "is_async_generator": is_generator and is_async,
+            "yield_count": yield_count,
+            "has_return_value": has_return_value,
+            "return_annotation": return_annotation,
+        }
+    except FileNotFoundError:
+        result: dict[str, Any] = {"error": f"File not found: {file_path}", "file": str(file_path)}
+        if repo_path:
+            similar = _find_similar_files(Path(file_path).name, repo_path)
+            if similar:
+                result["similar_files"] = similar
+        return result
+    except Exception as e:
+        return {"error": str(e), "file": str(file_path)}
+
+
 # Registry of all observation tools
 OBSERVATION_TOOLS: dict[str, Any] = {
     "exception_hierarchy": exception_hierarchy,
@@ -1586,6 +2026,9 @@ OBSERVATION_TOOLS: dict[str, Any] = {
     "file_imports": file_imports,
     "project_dependencies": project_dependencies,
     "related_test_files": related_test_files,
+    "class_hierarchy": class_hierarchy,
+    "symbol_migration": symbol_migration,
+    "generator_info": generator_info,
 }
 
 

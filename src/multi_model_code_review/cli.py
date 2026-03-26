@@ -12,7 +12,7 @@ from .aggregator import aggregate_reviews
 from .git_utils import extract_changed_files, fetch_pr_locally, get_diff, get_github_issue, get_pr_diff, post_pr_comment, pr_output_dir_name, read_file_content
 from .lint import check_test_discoverability, get_changed_python_files, run_lint_checks, run_lint_fixes
 from .fixer import fix_blocks as fix_blocks_async
-from .observations import coverage_map_tests, format_test_results, gather_function_context, gather_related_test_files, run_observations, run_tests_for_files
+from .observations import coverage_map_tests, file_imports, format_test_results, gather_function_context, gather_related_test_files, run_observations, run_tests_for_files
 from .prompts import build_observe_prompt, build_review_prompt, build_spec_check_prompt
 from .report import format_aggregate_review, format_summary
 from .reviewer import (
@@ -1154,6 +1154,21 @@ def review_loop(branch, base, pr, repo, spec, model, output, output_dir, max_ite
                 json.dump(test_context, f, indent=2, default=str)
         else:
             click.echo("No related test files found.", err=True)
+
+    # Auto-extract file references from beliefs content
+    if beliefs_content and repo != ".":
+        import re as _re
+        belief_file_refs = _re.findall(r'[\w/]+\.py', beliefs_content)
+        belief_file_refs = sorted(set(belief_file_refs))
+        if belief_file_refs:
+            click.echo(f"Auto-extracting imports from {len(belief_file_refs)} belief-referenced file(s)...", err=True)
+            for ref_path in belief_file_refs:
+                full_ref = Path(repo) / ref_path
+                if full_ref.exists():
+                    obs_key = f"belief_ref:{ref_path}"
+                    ref_result = asyncio.run(file_imports(ref_path, repo_path=repo))
+                    all_observations[obs_key] = ref_result
+                    click.echo(f"  {ref_path}: {len(ref_result.get('imports', []))} imports", err=True)
 
     # Run tests if requested
     if run_tests and python_files:
