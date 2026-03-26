@@ -22,7 +22,7 @@ You are running AI-powered code reviews using the `code-review` CLI tool. This t
 Try these in order until one works:
 1. `code-review $ARGUMENTS` (if installed via uv/pip)
 2. `uv run code-review $ARGUMENTS` (if in the repo with pyproject.toml)
-3. `uvx --from git+https://github.com/benthomasson/multi-model-code-review code-review $ARGUMENTS` (fallback)
+3. `uvx --from git+https://github.com/benthomasson/ftl-code-review code-review $ARGUMENTS` (fallback)
 
 ## Common Commands
 

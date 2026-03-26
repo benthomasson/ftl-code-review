@@ -1,1 +1,1 @@
-"""Tests for multi-model-code-review."""
+"""Tests for ftl-code-review."""

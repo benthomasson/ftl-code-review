@@ -5,12 +5,12 @@ import textwrap
 
 import pytest
 
-from multi_model_code_review.observations import (
+from ftl_code_review.observations import (
     function_body,
     gather_function_context,
     OBSERVATION_TOOLS,
 )
-from multi_model_code_review.git_utils import extract_modified_line_ranges
+from ftl_code_review.git_utils import extract_modified_line_ranges
 
 
 # ---------------------------------------------------------------------------

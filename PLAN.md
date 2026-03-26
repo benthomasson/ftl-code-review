@@ -1,4 +1,4 @@
-# Implementation Plan: multi-model-code-review
+# Implementation Plan: ftl-code-review
 
 ## Overview
 
@@ -36,12 +36,12 @@ Build a CLI tool that runs code reviews through multiple AI models before human 
 ### 1.1 Project Setup
 
 ```
-multi-model-code-review/
+ftl-code-review/
 ├── README.md
 ├── PLAN.md
 ├── pyproject.toml
 ├── src/
-│   └── multi_model_code_review/
+│   └── ftl_code_review/
 │       ├── __init__.py          # Data structures
 │       ├── cli.py               # Command dispatch
 │       ├── reviewer.py          # Model invocation
@@ -403,7 +403,7 @@ jobs:
 
       - name: Install tools
         run: |
-          uv tool install git+https://github.com/benthomasson/multi-model-code-review
+          uv tool install git+https://github.com/benthomasson/ftl-code-review
 
       - name: Run AI review gate
         env:
@@ -421,7 +421,7 @@ jobs:
 ai-review:
   stage: review
   script:
-    - uv tool install git+https://github.com/benthomasson/multi-model-code-review
+    - uv tool install git+https://github.com/benthomasson/ftl-code-review
     - code-review gate --diff $CI_MERGE_REQUEST_SOURCE_BRANCH_NAME
   rules:
     - if: $CI_PIPELINE_SOURCE == "merge_request_event"

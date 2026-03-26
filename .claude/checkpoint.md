@@ -1,11 +1,11 @@
 # Checkpoint
 
 **Saved:** 2026-02-26 20:00
-**Project:** /Users/ben/git/multi-model-code-review
+**Project:** /Users/ben/git/ftl-code-review
 
 ## Task
 
-Shipped multi-model-code-review v0.8.0 with `--fix-blocks` prototype and various bug fixes. Session complete.
+Shipped ftl-code-review v0.8.0 with `--fix-blocks` prototype and various bug fixes. Session complete.
 
 ## Status
 
@@ -26,9 +26,9 @@ Shipped multi-model-code-review v0.8.0 with `--fix-blocks` prototype and various
 
 ## Key Files
 
-- `src/multi_model_code_review/cli.py` — Main CLI, all commands, `_gather_coverage_lookups()` helper, `--fix-blocks` flag
-- `src/multi_model_code_review/observations.py` — Async observations, `_RaisesVisitor` for raises tracking
-- `src/multi_model_code_review/fixer.py` — NEW: `--fix-blocks` implementation (generate_fix, apply_patch, fix_blocks)
+- `src/ftl_code_review/cli.py` — Main CLI, all commands, `_gather_coverage_lookups()` helper, `--fix-blocks` flag
+- `src/ftl_code_review/observations.py` — Async observations, `_RaisesVisitor` for raises tracking
+- `src/ftl_code_review/fixer.py` — NEW: `--fix-blocks` implementation (generate_fix, apply_patch, fix_blocks)
 - `tests/test_cli.py` — NEW: 14 CLI tests with Click CliRunner
 - `reviews/files/2026-02-26_19-40-06/report.md` — Latest self-review showing CONCERN gate
 
@@ -36,7 +36,7 @@ Shipped multi-model-code-review v0.8.0 with `--fix-blocks` prototype and various
 
 ```bash
 # Run code review on source files with fix-blocks enabled
-uv run code-review files src/multi_model_code_review/ --fix-blocks -m claude
+uv run code-review files src/ftl_code_review/ --fix-blocks -m claude
 
 # Run tests
 uv run pytest tests/ -v

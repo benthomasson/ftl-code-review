@@ -5,7 +5,7 @@ import textwrap
 
 import pytest
 
-from multi_model_code_review.lint import (
+from ftl_code_review.lint import (
     TestDiscoverabilityResult,
     check_test_discoverability,
 )

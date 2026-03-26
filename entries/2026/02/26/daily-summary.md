@@ -5,7 +5,7 @@
 
 ## Overview
 
-Shipped coverage-map v0.5.0, multi-model-code-review v0.8.0 with `--fix-blocks` prototype, and 4 MRs to agents-python.
+Shipped coverage-map v0.5.0, ftl-code-review v0.8.0 with `--fix-blocks` prototype, and 4 MRs to agents-python.
 
 ## coverage-map v0.5.0
 
@@ -18,7 +18,7 @@ Built and released coverage-map tool for mapping source files to their tests.
 - [!812](https://gitlab.com/redhat/clt/agents-python/-/merge_requests/812) - fix: log clear HTTP errors for Pathfinder MCP 401s (open)
 - [!814](https://gitlab.com/redhat/clt/agents-python/-/merge_requests/814) - fix: skip Pathfinder MCP calls when using AGGREGATE path (merged)
 
-## multi-model-code-review v0.8.0
+## ftl-code-review v0.8.0
 
 Major improvements culminating in v0.8.0 with a new `--fix-blocks` prototype.
 

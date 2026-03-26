@@ -1,13 +1,13 @@
 """Tests for reviewer module - especially response parsing."""
 
-from multi_model_code_review import (
+from ftl_code_review import (
     Correctness,
     Integration,
     SpecCompliance,
     TestCoverage,
     Verdict,
 )
-from multi_model_code_review.reviewer import (
+from ftl_code_review.reviewer import (
     parse_correctness,
     parse_integration,
     parse_review_response,

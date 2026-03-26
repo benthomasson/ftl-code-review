@@ -6,7 +6,7 @@ _extract_enclosing_function functionality added for issue #3.
 
 import pytest
 
-from multi_model_code_review.observations import (
+from ftl_code_review.observations import (
     find_callers,
     find_usages,
     is_test_file,

@@ -1,4 +1,4 @@
-# multi-model-code-review
+# ftl-code-review
 
 AI-first code review using multiple models to surface issues before human review.
 
@@ -6,10 +6,10 @@ AI-first code review using multiple models to surface issues before human review
 
 ```bash
 # Run directly with uvx (no install needed)
-uvx --from "git+https://github.com/benthomasson/multi-model-code-review" code-review --help
+uvx --from "git+https://github.com/benthomasson/ftl-code-review" code-review --help
 
 # Or install as a tool
-uv tool install "git+https://github.com/benthomasson/multi-model-code-review"
+uv tool install "git+https://github.com/benthomasson/ftl-code-review"
 ```
 
 ## Quick Start

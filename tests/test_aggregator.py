@@ -1,11 +1,11 @@
 """Tests for aggregator module - disagreement detection and gate logic."""
 
-from multi_model_code_review import (
+from ftl_code_review import (
     ChangeVerdict,
     ModelReview,
     Verdict,
 )
-from multi_model_code_review.aggregator import (
+from ftl_code_review.aggregator import (
     aggregate_reviews,
     compute_gate,
     find_disagreements,

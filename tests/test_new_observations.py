@@ -9,7 +9,7 @@ Covers the three fixes from the implementation round:
 import pytest
 import sys
 
-from multi_model_code_review.observations import (
+from ftl_code_review.observations import (
     class_hierarchy,
     symbol_migration,
     generator_info,
@@ -382,9 +382,9 @@ class TestObservePromptFactoryGuidance:
     """Verify observe.py prompt includes factory method guidance."""
 
     def test_factory_method_in_prompt(self):
-        from multi_model_code_review.prompts.observe import OBSERVE_PROMPT
+        from ftl_code_review.prompts.observe import OBSERVE_PROMPT
         assert "factory method" in OBSERVE_PROMPT.lower() or "Factory method" in OBSERVE_PROMPT
 
     def test_error_result_example_in_prompt(self):
-        from multi_model_code_review.prompts.observe import OBSERVE_PROMPT
+        from ftl_code_review.prompts.observe import OBSERVE_PROMPT
         assert "error_result" in OBSERVE_PROMPT

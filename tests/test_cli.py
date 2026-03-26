@@ -7,8 +7,8 @@ from unittest.mock import AsyncMock, patch, MagicMock
 import pytest
 from click.testing import CliRunner
 
-from multi_model_code_review import ModelReview, ChangeVerdict, Verdict
-from multi_model_code_review.cli import cli
+from ftl_code_review import ModelReview, ChangeVerdict, Verdict
+from ftl_code_review.cli import cli
 
 
 @pytest.fixture
@@ -64,7 +64,7 @@ class TestReviewCommand:
 
     def test_review_no_changes(self, runner):
         """Test review with no changes."""
-        with patch("multi_model_code_review.cli.get_diff") as mock_get_diff:
+        with patch("ftl_code_review.cli.get_diff") as mock_get_diff:
             mock_get_diff.return_value = ""
             result = runner.invoke(cli, ["review"])
             assert result.exit_code == 0
@@ -72,8 +72,8 @@ class TestReviewCommand:
 
     def test_review_missing_model(self, runner, mock_diff):
         """Test review with missing model CLI."""
-        with patch("multi_model_code_review.cli.get_diff") as mock_get_diff, \
-             patch("multi_model_code_review.cli.preflight_check") as mock_preflight:
+        with patch("ftl_code_review.cli.get_diff") as mock_get_diff, \
+             patch("ftl_code_review.cli.preflight_check") as mock_preflight:
             mock_get_diff.return_value = mock_diff
             mock_preflight.return_value = ["nonexistent-model"]
             result = runner.invoke(cli, ["review", "-m", "nonexistent-model"])
@@ -82,9 +82,9 @@ class TestReviewCommand:
 
     def test_review_success(self, runner, mock_diff, mock_review):
         """Test successful review."""
-        with patch("multi_model_code_review.cli.get_diff") as mock_get_diff, \
-             patch("multi_model_code_review.cli.preflight_check") as mock_preflight, \
-             patch("multi_model_code_review.cli.review_with_models") as mock_review_models:
+        with patch("ftl_code_review.cli.get_diff") as mock_get_diff, \
+             patch("ftl_code_review.cli.preflight_check") as mock_preflight, \
+             patch("ftl_code_review.cli.review_with_models") as mock_review_models:
             mock_get_diff.return_value = mock_diff
             mock_preflight.return_value = []
             mock_review_models.return_value = [mock_review]
@@ -99,9 +99,9 @@ class TestGateCommand:
 
     def test_gate_pass_exits_0(self, runner, mock_diff, mock_review):
         """Test gate command exits 0 on PASS."""
-        with patch("multi_model_code_review.cli.get_diff") as mock_get_diff, \
-             patch("multi_model_code_review.cli.preflight_check") as mock_preflight, \
-             patch("multi_model_code_review.cli.review_with_models") as mock_review_models:
+        with patch("ftl_code_review.cli.get_diff") as mock_get_diff, \
+             patch("ftl_code_review.cli.preflight_check") as mock_preflight, \
+             patch("ftl_code_review.cli.review_with_models") as mock_review_models:
             mock_get_diff.return_value = mock_diff
             mock_preflight.return_value = []
             mock_review_models.return_value = [mock_review]
@@ -123,9 +123,9 @@ class TestGateCommand:
             ],
             raw_response="### src/foo.py\nVERDICT: CONCERN\nREASONING: Needs tests",
         )
-        with patch("multi_model_code_review.cli.get_diff") as mock_get_diff, \
-             patch("multi_model_code_review.cli.preflight_check") as mock_preflight, \
-             patch("multi_model_code_review.cli.review_with_models") as mock_review_models:
+        with patch("ftl_code_review.cli.get_diff") as mock_get_diff, \
+             patch("ftl_code_review.cli.preflight_check") as mock_preflight, \
+             patch("ftl_code_review.cli.review_with_models") as mock_review_models:
             mock_get_diff.return_value = mock_diff
             mock_preflight.return_value = []
             mock_review_models.return_value = [concern_review]
@@ -147,9 +147,9 @@ class TestGateCommand:
             ],
             raw_response="### src/foo.py\nVERDICT: BLOCK\nREASONING: Security issue",
         )
-        with patch("multi_model_code_review.cli.get_diff") as mock_get_diff, \
-             patch("multi_model_code_review.cli.preflight_check") as mock_preflight, \
-             patch("multi_model_code_review.cli.review_with_models") as mock_review_models:
+        with patch("ftl_code_review.cli.get_diff") as mock_get_diff, \
+             patch("ftl_code_review.cli.preflight_check") as mock_preflight, \
+             patch("ftl_code_review.cli.review_with_models") as mock_review_models:
             mock_get_diff.return_value = mock_diff
             mock_preflight.return_value = []
             mock_review_models.return_value = [block_review]
@@ -163,8 +163,8 @@ class TestObserveCommand:
 
     def test_observe_missing_model(self, runner, mock_diff):
         """Test observe with missing model CLI."""
-        with patch("multi_model_code_review.cli.get_diff") as mock_get_diff, \
-             patch("multi_model_code_review.cli.preflight_check") as mock_preflight:
+        with patch("ftl_code_review.cli.get_diff") as mock_get_diff, \
+             patch("ftl_code_review.cli.preflight_check") as mock_preflight:
             mock_get_diff.return_value = mock_diff
             mock_preflight.return_value = ["nonexistent-model"]
             result = runner.invoke(cli, ["observe", "-m", "nonexistent-model"])
@@ -186,9 +186,9 @@ class TestFilesCommand:
         py_file = tmp_path / "test.py"
         py_file.write_text("def foo(): pass")
 
-        with patch("multi_model_code_review.cli.preflight_check") as mock_preflight, \
-             patch("multi_model_code_review.cli.review_with_models") as mock_review_models, \
-             patch("multi_model_code_review.cli._gather_coverage_lookups") as mock_coverage:
+        with patch("ftl_code_review.cli.preflight_check") as mock_preflight, \
+             patch("ftl_code_review.cli.review_with_models") as mock_review_models, \
+             patch("ftl_code_review.cli._gather_coverage_lookups") as mock_coverage:
             mock_preflight.return_value = []
             mock_review_models.return_value = [mock_review]
             mock_coverage.return_value = {}
@@ -219,14 +219,14 @@ class TestGatherCoverageLookups:
     @pytest.mark.asyncio
     async def test_gather_coverage_lookups_empty(self):
         """Test with empty file list."""
-        from multi_model_code_review.cli import _gather_coverage_lookups
+        from ftl_code_review.cli import _gather_coverage_lookups
         result = await _gather_coverage_lookups([], "/tmp")
         assert result == {}
 
     @pytest.mark.asyncio
     async def test_gather_coverage_lookups_no_coverage_map(self, tmp_path):
         """Test when coverage-map.json doesn't exist."""
-        from multi_model_code_review.cli import _gather_coverage_lookups
+        from ftl_code_review.cli import _gather_coverage_lookups
 
         # No coverage-map.json, so all lookups will return errors
         result = await _gather_coverage_lookups(["foo.py"], str(tmp_path))
@@ -235,7 +235,7 @@ class TestGatherCoverageLookups:
     @pytest.mark.asyncio
     async def test_gather_coverage_lookups_with_data(self, tmp_path):
         """Test with coverage-map.json present."""
-        from multi_model_code_review.cli import _gather_coverage_lookups
+        from ftl_code_review.cli import _gather_coverage_lookups
 
         # Create a coverage-map.json with correct format
         coverage_map = {

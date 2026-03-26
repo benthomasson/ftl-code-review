@@ -2,7 +2,7 @@
 
 import pytest
 
-from multi_model_code_review.observations import (
+from ftl_code_review.observations import (
     exception_hierarchy,
     raises_analysis,
     call_graph,

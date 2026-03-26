@@ -6,7 +6,7 @@ import textwrap
 
 import pytest
 
-from multi_model_code_review.observations import (
+from ftl_code_review.observations import (
     format_test_results,
     run_tests_for_files,
 )
