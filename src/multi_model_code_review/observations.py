@@ -995,6 +995,214 @@ async def gather_related_test_files(
     }
 
 
+async def run_tests_for_files(
+    changed_files: list[str],
+    repo_path: str,
+    timeout: int = 120,
+) -> dict[str, Any]:
+    """Run pytest on tests related to changed source files.
+
+    Discovers relevant tests via coverage-map (preferred) or naming conventions,
+    then runs them and returns structured pass/fail results.
+
+    Args:
+        changed_files: List of changed Python source file paths (relative to repo).
+        repo_path: Repository root path.
+        timeout: Maximum seconds to allow pytest to run (default 120).
+
+    Returns:
+        Dict with pass/fail counts, status, output, test list, and duration.
+
+    Example::
+
+        >>> result = asyncio.run(run_tests_for_files(["src/foo.py"], "/repo"))
+        >>> print(result["status"])  # "PASSED", "FAILED", "ERROR", or "TIMEOUT"
+        >>> print(result["passed"], result["failed"])
+    """
+    import subprocess
+    import time
+
+    # Filter to non-test Python files
+    source_files = [
+        f for f in changed_files
+        if f.endswith(".py")
+        and not Path(f).name.startswith("test_")
+        and not f.endswith("_test.py")
+    ]
+
+    if not source_files:
+        return {
+            "passed": 0, "failed": 0, "errors": 0, "total": 0,
+            "status": "SKIPPED",
+            "output": "No non-test Python source files to test",
+            "tests_run": [],
+            "duration_seconds": 0.0,
+        }
+
+    # Collect relevant test files from all sources
+    all_tests: set[str] = set()
+
+    for source_file in source_files:
+        module_name = Path(source_file).stem
+
+        # Strategy 1: Coverage map (most accurate)
+        try:
+            cov_result = await coverage_map_tests(source_file, repo_path)
+            if "error" not in cov_result and cov_result.get("tests"):
+                for test_entry in cov_result["tests"]:
+                    if isinstance(test_entry, str) and "::" in test_entry:
+                        test_file = test_entry.split("::")[0]
+                        all_tests.add(test_file)
+                    elif isinstance(test_entry, str) and test_entry.endswith(".py"):
+                        all_tests.add(test_entry)
+        except Exception:
+            pass
+
+        # Strategy 2: Naming convention fallback
+        try:
+            naming_results = await _find_test_files_by_naming(module_name, repo_path)
+            all_tests.update(naming_results)
+        except Exception:
+            pass
+
+    if not all_tests:
+        return {
+            "passed": 0, "failed": 0, "errors": 0, "total": 0,
+            "status": "SKIPPED",
+            "output": "No related test files found",
+            "tests_run": [],
+            "duration_seconds": 0.0,
+        }
+
+    # Verify test files exist
+    test_files = sorted(
+        t for t in all_tests if (Path(repo_path) / t).exists()
+    )
+
+    if not test_files:
+        return {
+            "passed": 0, "failed": 0, "errors": 0, "total": 0,
+            "status": "SKIPPED",
+            "output": "Related test files not found on disk",
+            "tests_run": [],
+            "duration_seconds": 0.0,
+        }
+
+    # Run pytest
+    cmd = [
+        sys.executable, "-m", "pytest",
+        *test_files,
+        "--tb=short", "--no-header", "-q",
+    ]
+
+    start = time.monotonic()
+    try:
+        proc = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            cwd=repo_path,
+            timeout=timeout,
+        )
+        duration = time.monotonic() - start
+        output = proc.stdout + proc.stderr
+
+        # Parse pytest summary line: "X passed, Y failed, Z errors"
+        passed = failed = errors = 0
+        for line in output.splitlines():
+            line_lower = line.lower()
+            if "passed" in line_lower or "failed" in line_lower or "error" in line_lower:
+                import re
+                for match in re.finditer(r"(\d+) (passed|failed|error)", line_lower):
+                    count = int(match.group(1))
+                    kind = match.group(2)
+                    if kind == "passed":
+                        passed = count
+                    elif kind == "failed":
+                        failed = count
+                    elif kind == "error":
+                        errors = count
+
+        total = passed + failed + errors
+        if failed > 0 or errors > 0:
+            status = "FAILED"
+            # Truncate output to last 200 lines on failure
+            lines = output.splitlines()
+            if len(lines) > 200:
+                output = "\n".join(["... (truncated)"] + lines[-200:])
+        else:
+            status = "PASSED" if proc.returncode == 0 else "ERROR"
+
+        return {
+            "passed": passed,
+            "failed": failed,
+            "errors": errors,
+            "total": total,
+            "status": status,
+            "output": output,
+            "tests_run": test_files,
+            "duration_seconds": round(duration, 2),
+        }
+
+    except subprocess.TimeoutExpired:
+        duration = time.monotonic() - start
+        return {
+            "passed": 0, "failed": 0, "errors": 0, "total": 0,
+            "status": "TIMEOUT",
+            "output": f"pytest timed out after {timeout}s",
+            "tests_run": test_files,
+            "duration_seconds": round(duration, 2),
+        }
+    except FileNotFoundError:
+        return {
+            "passed": 0, "failed": 0, "errors": 0, "total": 0,
+            "status": "ERROR",
+            "output": "pytest not found — is it installed in the target environment?",
+            "tests_run": test_files,
+            "duration_seconds": 0.0,
+        }
+
+
+def format_test_results(results: dict[str, Any]) -> str:
+    """Format test execution results for inclusion in review context.
+
+    Args:
+        results: Output from ``run_tests_for_files()``.
+
+    Returns:
+        Markdown-formatted string summarizing test results.
+
+    Example::
+
+        >>> print(format_test_results({"status": "PASSED", "passed": 5, ...}))
+        ## Test Execution Results
+        Status: PASSED (5 passed, 0 failed, 0 errors) in 1.2s
+    """
+    status = results.get("status", "UNKNOWN")
+    passed = results.get("passed", 0)
+    failed = results.get("failed", 0)
+    errors = results.get("errors", 0)
+    duration = results.get("duration_seconds", 0)
+    tests_run = results.get("tests_run", [])
+
+    lines = [
+        "## Test Execution Results",
+        f"Status: {status} ({passed} passed, {failed} failed, {errors} errors) in {duration}s",
+    ]
+
+    if tests_run:
+        lines.append(f"Tests run for: {', '.join(tests_run)}")
+
+    if status in ("FAILED", "ERROR", "TIMEOUT"):
+        output = results.get("output", "")
+        if output:
+            lines.append("")
+            lines.append("### Output:")
+            lines.append(f"```\n{output}\n```")
+
+    return "\n".join(lines)
+
+
 async def related_test_files(file_path: str, repo_path: str) -> dict[str, Any]:
     """Find test files related to a specific source file.
 

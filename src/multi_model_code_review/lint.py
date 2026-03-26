@@ -295,3 +295,151 @@ def get_changed_python_files(
 
     files = [f for f in result.stdout.strip().split("\n") if f and f.endswith(".py")]
     return files
+
+
+@dataclass
+class TestDiscoverabilityResult:
+    """Result of checking test file discoverability."""
+
+    warnings: list[str]
+
+    @property
+    def passed(self) -> bool:
+        return len(self.warnings) == 0
+
+    @property
+    def summary(self) -> str:
+        if self.passed:
+            return "All test files are discoverable by pytest"
+        return "\n".join(self.warnings)
+
+
+def check_test_discoverability(
+    changed_files: list[str],
+    repo_path: str,
+    new_files_only: bool = True,
+) -> TestDiscoverabilityResult:
+    """Check that test files match pytest discovery paths and conventions.
+
+    Examines changed (or new) test files to verify they'll be found by pytest,
+    and flags anti-patterns like ``sys.path.insert``.
+
+    Args:
+        changed_files: List of changed file paths (relative to repo_path).
+        repo_path: Repository root path.
+        new_files_only: If True, only check newly added files (via git status).
+            If False, check all changed test files.
+
+    Returns:
+        TestDiscoverabilityResult with any warnings found.
+
+    Example::
+
+        >>> result = check_test_discoverability(["tests/test_foo.py"], "/repo")
+        >>> print(result.passed)
+        True
+    """
+    from pathlib import Path
+
+    warnings: list[str] = []
+    repo = Path(repo_path)
+
+    # Identify test files among changed files
+    test_files = [
+        f for f in changed_files
+        if Path(f).name.startswith("test_") or f.endswith("_test.py")
+    ]
+
+    if not test_files:
+        return TestDiscoverabilityResult(warnings=[])
+
+    # If new_files_only, filter to untracked/added files
+    if new_files_only:
+        result = subprocess.run(
+            ["git", "diff", "--name-only", "--diff-filter=A", "HEAD"],
+            capture_output=True, text=True, cwd=repo_path,
+        )
+        new_files = set(result.stdout.strip().split("\n")) if result.returncode == 0 else set()
+        # Also check untracked
+        result2 = subprocess.run(
+            ["git", "ls-files", "--others", "--exclude-standard"],
+            capture_output=True, text=True, cwd=repo_path,
+        )
+        if result2.returncode == 0:
+            new_files.update(result2.stdout.strip().split("\n"))
+        test_files = [f for f in test_files if f in new_files]
+
+    if not test_files:
+        return TestDiscoverabilityResult(warnings=[])
+
+    # Read pytest config from pyproject.toml
+    testpaths: list[str] = []
+    python_files_patterns: list[str] = ["test_*.py"]
+    pyproject_path = repo / "pyproject.toml"
+
+    if pyproject_path.exists():
+        try:
+            import tomllib
+        except ImportError:
+            try:
+                import tomli as tomllib  # type: ignore[no-redefine]
+            except ImportError:
+                tomllib = None  # type: ignore[assignment]
+
+        if tomllib is not None:
+            try:
+                with open(pyproject_path, "rb") as f:
+                    pyproject = tomllib.load(f)
+                pytest_opts = pyproject.get("tool", {}).get("pytest", {}).get("ini_options", {})
+                testpaths = pytest_opts.get("testpaths", [])
+                python_files_patterns = pytest_opts.get("python_files", ["test_*.py"])
+                if isinstance(python_files_patterns, str):
+                    python_files_patterns = [python_files_patterns]
+            except Exception:
+                pass
+
+    for test_file in test_files:
+        test_path = Path(test_file)
+
+        # Check 1: If testpaths configured, verify the file is under one of them
+        if testpaths:
+            under_testpath = any(
+                test_file.startswith(tp.rstrip("/") + "/") or test_file == tp
+                for tp in testpaths
+            )
+            if not under_testpath:
+                warnings.append(
+                    f"⚠ {test_file}: not under configured testpaths {testpaths} — "
+                    f"pytest may not discover this file"
+                )
+
+        # Check 2: Verify filename matches python_files patterns
+        import fnmatch
+        name_matches = any(
+            fnmatch.fnmatch(test_path.name, pat) for pat in python_files_patterns
+        )
+        if not name_matches:
+            warnings.append(
+                f"⚠ {test_file}: filename doesn't match pytest python_files "
+                f"patterns {python_files_patterns}"
+            )
+
+        # Check 3: Flag sys.path.insert / sys.path.append anti-patterns
+        full_path = repo / test_file
+        if full_path.exists():
+            try:
+                content = full_path.read_text()
+                for i, line in enumerate(content.splitlines(), 1):
+                    stripped = line.strip()
+                    if stripped.startswith("#"):
+                        continue
+                    if "sys.path.insert" in stripped or "sys.path.append" in stripped:
+                        warnings.append(
+                            f"⚠ {test_file}:{i}: uses {stripped.split('(')[0].strip()}() — "
+                            f"prefer proper pytest discovery (conftest.py or package install)"
+                        )
+                        break  # One warning per file is enough
+            except Exception:
+                pass
+
+    return TestDiscoverabilityResult(warnings=warnings)

@@ -10,9 +10,9 @@ import json
 from . import Verdict
 from .aggregator import aggregate_reviews
 from .git_utils import extract_changed_files, fetch_pr_locally, get_diff, get_github_issue, get_pr_diff, post_pr_comment, pr_output_dir_name, read_file_content
-from .lint import get_changed_python_files, run_lint_checks, run_lint_fixes
+from .lint import check_test_discoverability, get_changed_python_files, run_lint_checks, run_lint_fixes
 from .fixer import fix_blocks as fix_blocks_async
-from .observations import coverage_map_tests, gather_function_context, gather_related_test_files, run_observations
+from .observations import coverage_map_tests, format_test_results, gather_function_context, gather_related_test_files, run_observations, run_tests_for_files
 from .prompts import build_observe_prompt, build_review_prompt, build_spec_check_prompt
 from .report import format_aggregate_review, format_summary
 from .reviewer import (
@@ -942,7 +942,18 @@ def models():
     default=False,
     help="Post review as a comment on the PR (requires --pr)",
 )
-def review_loop(branch, base, pr, repo, spec, model, output, output_dir, max_iterations, beliefs, issue, github_issue, comment):
+@click.option(
+    "--run-tests/--no-run-tests",
+    default=False,
+    help="Run pytest on related test files and include results in review context",
+)
+@click.option(
+    "--coverage-map/--no-coverage-map",
+    "use_coverage_map",
+    default=False,
+    help="Auto-run 'coverage-map collect' if coverage-map.json is missing or stale",
+)
+def review_loop(branch, base, pr, repo, spec, model, output, output_dir, max_iterations, beliefs, issue, github_issue, comment, run_tests, use_coverage_map):
     """
     Run automated observe/review loop.
 
@@ -1038,9 +1049,54 @@ def review_loop(branch, base, pr, repo, spec, model, output, output_dir, max_ite
     # Create output_dir early so we can save iteration artifacts
     os.makedirs(output_dir, exist_ok=True)
 
-    # Auto-lookup coverage-map for changed files (parallel)
+    # Auto-run coverage-map collect if requested and stale/missing
     changed_files = extract_changed_files(diff_content)
     python_files = [f for f in changed_files if f.endswith(".py") and not f.startswith("tests/")]
+
+    if use_coverage_map and python_files:
+        import subprocess as _sp
+
+        cov_json = os.path.join(repo, "coverage-map.json")
+        needs_collect = not os.path.exists(cov_json)
+
+        if not needs_collect:
+            # Check staleness: if any source file is newer than coverage-map.json
+            cov_mtime = os.path.getmtime(cov_json)
+            for src in python_files:
+                src_path = os.path.join(repo, src)
+                if os.path.exists(src_path) and os.path.getmtime(src_path) > cov_mtime:
+                    needs_collect = True
+                    break
+
+        if needs_collect:
+            click.echo("Running coverage-map collect (this may take a while)...", err=True)
+            try:
+                proc = _sp.run(
+                    ["coverage-map", "collect"],
+                    capture_output=True, text=True,
+                    cwd=repo, timeout=300,
+                )
+                if proc.returncode == 0:
+                    click.echo("coverage-map collect completed successfully", err=True)
+                else:
+                    click.echo(
+                        click.style(f"WARNING: coverage-map collect failed: {proc.stderr[:200]}", fg="yellow"),
+                        err=True,
+                    )
+            except FileNotFoundError:
+                click.echo(
+                    click.style("WARNING: coverage-map not installed, skipping collect", fg="yellow"),
+                    err=True,
+                )
+            except _sp.TimeoutExpired:
+                click.echo(
+                    click.style("WARNING: coverage-map collect timed out after 300s", fg="yellow"),
+                    err=True,
+                )
+        else:
+            click.echo("coverage-map.json is up to date", err=True)
+
+    # Auto-lookup coverage-map for changed files (parallel)
     if python_files:
         click.echo(f"Auto-lookup: {len(python_files)} Python file(s) changed", err=True)
         coverage_obs = asyncio.run(_gather_coverage_lookups(python_files, repo))
@@ -1099,6 +1155,39 @@ def review_loop(branch, base, pr, repo, spec, model, output, output_dir, max_ite
         else:
             click.echo("No related test files found.", err=True)
 
+    # Run tests if requested
+    if run_tests and python_files:
+        click.echo("Running pytest on related test files...", err=True)
+        test_results = asyncio.run(run_tests_for_files(python_files, repo))
+        status = test_results["status"]
+        if status != "SKIPPED":
+            passed = test_results["passed"]
+            failed = test_results["failed"]
+            errors = test_results["errors"]
+            duration = test_results["duration_seconds"]
+            click.echo(
+                f"Tests: {passed} passed, {failed} failed, {errors} errors ({duration}s) — {status}",
+                err=True,
+            )
+            # Add formatted results to observations
+            all_observations["test_execution"] = test_results
+            all_observations["test_execution_summary"] = format_test_results(test_results)
+            with open(os.path.join(output_dir, "00-auto-test-results.json"), "w") as f:
+                json.dump(test_results, f, indent=2, default=str)
+        else:
+            click.echo(f"Tests skipped: {test_results['output']}", err=True)
+
+    # Check test discoverability for new test files
+    if changed_files:
+        disc_result = check_test_discoverability(changed_files, repo)
+        if not disc_result.passed:
+            click.echo(click.style("Test discoverability warnings:", fg="yellow"), err=True)
+            for warning in disc_result.warnings:
+                click.echo(click.style(f"  {warning}", fg="yellow"), err=True)
+            all_observations["test_discoverability"] = {
+                "warnings": disc_result.warnings,
+                "passed": False,
+            }
     for iteration in range(1, max_iterations + 1):
         click.echo(f"\n=== Iteration {iteration}/{max_iterations} ===", err=True)
         iter_prefix = f"{iteration:02d}"
