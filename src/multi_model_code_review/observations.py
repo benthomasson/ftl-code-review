@@ -690,6 +690,568 @@ async def gather_function_context(
     return results
 
 
+def _extract_modified_symbols(diff_content: str, repo_path: str) -> dict[str, set[str]]:
+    """Extract function/class names modified in each file from a diff.
+
+    Parses the diff to find modified line ranges, then uses AST to identify
+    which functions or classes those lines belong to.
+
+    Args:
+        diff_content: Unified diff output.
+        repo_path: Repository root for resolving file paths.
+
+    Returns:
+        Dict mapping file paths to sets of modified symbol names
+        (e.g. ``{"src/proxy.py": {"handle_request", "ProxyClient"}}``).
+    """
+    from .git_utils import extract_modified_line_ranges
+
+    ranges = extract_modified_line_ranges(diff_content)
+    result: dict[str, set[str]] = {}
+
+    for file_path, line_ranges in ranges.items():
+        if not file_path.endswith(".py"):
+            continue
+        full_path = Path(repo_path) / file_path
+        if not full_path.exists():
+            continue
+
+        try:
+            source = full_path.read_text()
+            tree = ast.parse(source)
+        except Exception:
+            continue
+
+        symbols: set[str] = set()
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                node_start = node.lineno
+                node_end = node.end_lineno or node_start
+                for start, end in line_ranges:
+                    if node_start <= end and node_end >= start:
+                        symbols.add(node.name)
+                        break
+
+        if symbols:
+            result[file_path] = symbols
+
+    return result
+
+
+async def _find_test_files_by_naming(module_name: str, repo_path: str) -> list[str]:
+    """Find test files by naming convention.
+
+    Searches common test directory patterns for files matching
+    ``test_{module}.py`` or ``{module}_test.py``.
+
+    Args:
+        module_name: Module stem (e.g. "proxy" from "proxy.py").
+        repo_path: Repository root path.
+
+    Returns:
+        List of relative file paths to discovered test files.
+    """
+    test_patterns = [
+        f"test_{module_name}.py",
+        f"{module_name}_test.py",
+    ]
+    search_dirs = ["tests", "test", "tests/unit", "tests/integration", "."]
+
+    found: list[str] = []
+    repo = Path(repo_path)
+
+    for search_dir in search_dirs:
+        dir_path = repo / search_dir
+        if not dir_path.is_dir():
+            continue
+        for pattern in test_patterns:
+            for match in dir_path.glob(pattern):
+                rel = str(match.relative_to(repo))
+                if rel not in found:
+                    found.append(rel)
+
+    return found
+
+
+async def _find_test_files_by_imports(
+    module_name: str, source_file: str, repo_path: str
+) -> list[str]:
+    """Find test files that import from a given module.
+
+    Searches for ``from {module} import`` or ``import {module}`` patterns
+    in Python test files across the repository.
+
+    Args:
+        module_name: Module stem to search for in import statements.
+        source_file: Dotted module path (e.g. "src.auth.client").
+        repo_path: Repository root path.
+
+    Returns:
+        List of relative file paths that import from the module.
+    """
+    # Build patterns to search for
+    patterns = [
+        f"from {module_name} import",
+        f"import {module_name}",
+    ]
+    # Also try dotted module path from source file
+    dotted = source_file.replace("/", ".").replace(".py", "")
+    if dotted != module_name:
+        patterns.append(f"from {dotted} import")
+        patterns.append(f"import {dotted}")
+
+    # Also try partial dotted paths (e.g. "auth.client" from "src/auth/client.py")
+    parts = dotted.split(".")
+    if len(parts) > 1:
+        for i in range(len(parts) - 1):
+            partial = ".".join(parts[i:])
+            patterns.append(f"from {partial} import")
+
+    # Search test files using grep
+    grep_pattern = "|".join(patterns)
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "grep", "-rl", "--include=*.py", "-E", grep_pattern, repo_path,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        try:
+            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=30)
+        except asyncio.TimeoutError:
+            proc.kill()
+            return []
+
+        found: list[str] = []
+        for line in stdout.decode().strip().split("\n"):
+            if not line:
+                continue
+            rel = line.replace(repo_path + "/", "").replace(repo_path, "")
+            rel = rel.lstrip("/")
+            # Only include test files
+            basename = Path(rel).name
+            if basename.startswith("test_") or basename.endswith("_test.py"):
+                if rel not in found:
+                    found.append(rel)
+        return found
+    except Exception:
+        return []
+
+
+async def gather_related_test_files(
+    diff_content: str,
+    repo_path: str,
+    max_lines_per_file: int = 500,
+    max_total_lines: int = 2000,
+) -> dict[str, Any]:
+    """Auto-discover test files related to modified code and return their content.
+
+    Given a diff, finds test files that cover modified source files using three
+    strategies:
+    1. **Naming convention**: ``test_{module}.py`` / ``{module}_test.py`` in
+       common locations (``tests/``, ``test/``, same directory).
+    2. **Coverage map**: Precise test mapping from ``coverage-map.json`` if available.
+    3. **Import scanning**: Grep for ``from {module} import`` across test files.
+
+    Reads full test file content (capped) and filters to tests that reference
+    actually-modified symbols. Also flags duplicate coverage when multiple test
+    files cover the same source file.
+
+    Args:
+        diff_content: Unified diff output.
+        repo_path: Repository root path.
+        max_lines_per_file: Maximum lines to include per test file (default 500).
+        max_total_lines: Maximum total lines across all test files (default 2000).
+
+    Returns:
+        Dict with ``test_files`` (list of file info dicts), ``modified_symbols``
+        (symbols found in the diff), ``duplicate_coverage`` (files covered by
+        multiple test files), and summary statistics.
+
+    Example::
+
+        >>> result = asyncio.run(gather_related_test_files(diff, "/path/to/repo"))
+        >>> for tf in result["test_files"]:
+        ...     print(tf["path"], tf["symbols_referenced"])
+    """
+    from .git_utils import extract_changed_files
+
+    changed_files = extract_changed_files(diff_content)
+    source_files = [
+        f for f in changed_files
+        if f.endswith(".py")
+        and not Path(f).name.startswith("test_")
+        and not f.endswith("_test.py")
+    ]
+
+    if not source_files:
+        return {"test_files": [], "modified_symbols": {}, "message": "No non-test Python files modified"}
+
+    # Extract modified symbols from the diff
+    modified_symbols = _extract_modified_symbols(diff_content, repo_path)
+
+    # Discover test files for each source file (parallel)
+    all_test_files: dict[str, list[str]] = {}  # test_path -> list of source files it covers
+    source_to_tests: dict[str, list[str]] = {}
+
+    discovery_tasks = []
+    for source_file in source_files:
+        module_name = Path(source_file).stem
+        discovery_tasks.append((source_file, module_name))
+
+    for source_file, module_name in discovery_tasks:
+        tests: set[str] = set()
+
+        # Strategy 1: Naming convention
+        naming_results = await _find_test_files_by_naming(module_name, repo_path)
+        tests.update(naming_results)
+
+        # Strategy 2: Coverage map
+        try:
+            cov_result = await coverage_map_tests(source_file, repo_path)
+            if "error" not in cov_result and cov_result.get("tests"):
+                for test_entry in cov_result["tests"]:
+                    # coverage_map_tests returns test names, extract file paths
+                    if isinstance(test_entry, str) and "::" in test_entry:
+                        test_file = test_entry.split("::")[0]
+                        tests.add(test_file)
+                    elif isinstance(test_entry, str) and test_entry.endswith(".py"):
+                        tests.add(test_entry)
+        except Exception:
+            pass
+
+        # Strategy 3: Import scanning
+        import_results = await _find_test_files_by_imports(module_name, source_file, repo_path)
+        tests.update(import_results)
+
+        # Record mappings
+        source_to_tests[source_file] = sorted(tests)
+        for test_path in tests:
+            all_test_files.setdefault(test_path, []).append(source_file)
+
+    # Read test file content, filtering by symbol relevance
+    test_file_results: list[dict[str, Any]] = []
+    total_lines = 0
+
+    # Get all modified symbol names for quick lookup
+    all_symbols: set[str] = set()
+    for symbols in modified_symbols.values():
+        all_symbols.update(symbols)
+
+    for test_path in sorted(all_test_files.keys()):
+        if total_lines >= max_total_lines:
+            break
+
+        full_path = Path(repo_path) / test_path
+        if not full_path.exists():
+            continue
+
+        try:
+            content = full_path.read_text()
+        except Exception:
+            continue
+
+        lines = content.splitlines()
+        line_count = len(lines)
+
+        # Check which modified symbols this test file references
+        symbols_referenced: list[str] = []
+        if all_symbols:
+            for symbol in all_symbols:
+                if symbol in content:
+                    symbols_referenced.append(symbol)
+
+        # Truncate if needed
+        truncated = False
+        remaining = max_total_lines - total_lines
+        cap = min(max_lines_per_file, remaining)
+        if line_count > cap:
+            lines = lines[:cap]
+            truncated = True
+
+        total_lines += len(lines)
+
+        test_file_results.append({
+            "path": test_path,
+            "covers": all_test_files[test_path],
+            "symbols_referenced": sorted(symbols_referenced),
+            "line_count": line_count,
+            "truncated": truncated,
+            "content": "\n".join(lines),
+        })
+
+    # Detect duplicate coverage
+    duplicate_coverage: dict[str, list[str]] = {}
+    for source_file, tests in source_to_tests.items():
+        if len(tests) > 1:
+            duplicate_coverage[source_file] = tests
+
+    return {
+        "test_files": test_file_results,
+        "test_file_count": len(test_file_results),
+        "modified_symbols": {k: sorted(v) for k, v in modified_symbols.items()},
+        "source_to_tests": source_to_tests,
+        "duplicate_coverage": duplicate_coverage,
+        "total_lines_included": total_lines,
+    }
+
+
+async def run_tests_for_files(
+    changed_files: list[str],
+    repo_path: str,
+    timeout: int = 120,
+) -> dict[str, Any]:
+    """Run pytest on tests related to changed source files.
+
+    Discovers relevant tests via coverage-map (preferred) or naming conventions,
+    then runs them and returns structured pass/fail results.
+
+    Args:
+        changed_files: List of changed Python source file paths (relative to repo).
+        repo_path: Repository root path.
+        timeout: Maximum seconds to allow pytest to run (default 120).
+
+    Returns:
+        Dict with pass/fail counts, status, output, test list, and duration.
+
+    Example::
+
+        >>> result = asyncio.run(run_tests_for_files(["src/foo.py"], "/repo"))
+        >>> print(result["status"])  # "PASSED", "FAILED", "ERROR", or "TIMEOUT"
+        >>> print(result["passed"], result["failed"])
+    """
+    import subprocess
+    import time
+
+    # Filter to non-test Python files
+    source_files = [
+        f for f in changed_files
+        if f.endswith(".py")
+        and not Path(f).name.startswith("test_")
+        and not f.endswith("_test.py")
+    ]
+
+    if not source_files:
+        return {
+            "passed": 0, "failed": 0, "errors": 0, "total": 0,
+            "status": "SKIPPED",
+            "output": "No non-test Python source files to test",
+            "tests_run": [],
+            "duration_seconds": 0.0,
+        }
+
+    # Collect relevant test files from all sources
+    all_tests: set[str] = set()
+
+    for source_file in source_files:
+        module_name = Path(source_file).stem
+
+        # Strategy 1: Coverage map (most accurate)
+        try:
+            cov_result = await coverage_map_tests(source_file, repo_path)
+            if "error" not in cov_result and cov_result.get("tests"):
+                for test_entry in cov_result["tests"]:
+                    if isinstance(test_entry, str) and "::" in test_entry:
+                        test_file = test_entry.split("::")[0]
+                        all_tests.add(test_file)
+                    elif isinstance(test_entry, str) and test_entry.endswith(".py"):
+                        all_tests.add(test_entry)
+        except Exception:
+            pass
+
+        # Strategy 2: Naming convention fallback
+        try:
+            naming_results = await _find_test_files_by_naming(module_name, repo_path)
+            all_tests.update(naming_results)
+        except Exception:
+            pass
+
+    if not all_tests:
+        return {
+            "passed": 0, "failed": 0, "errors": 0, "total": 0,
+            "status": "SKIPPED",
+            "output": "No related test files found",
+            "tests_run": [],
+            "duration_seconds": 0.0,
+        }
+
+    # Verify test files exist
+    test_files = sorted(
+        t for t in all_tests if (Path(repo_path) / t).exists()
+    )
+
+    if not test_files:
+        return {
+            "passed": 0, "failed": 0, "errors": 0, "total": 0,
+            "status": "SKIPPED",
+            "output": "Related test files not found on disk",
+            "tests_run": [],
+            "duration_seconds": 0.0,
+        }
+
+    # Run pytest
+    cmd = [
+        sys.executable, "-m", "pytest",
+        *test_files,
+        "--tb=short", "--no-header", "-q",
+    ]
+
+    start = time.monotonic()
+    try:
+        proc = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            cwd=repo_path,
+            timeout=timeout,
+        )
+        duration = time.monotonic() - start
+        output = proc.stdout + proc.stderr
+
+        # Parse pytest summary line: "X passed, Y failed, Z errors"
+        passed = failed = errors = 0
+        for line in output.splitlines():
+            line_lower = line.lower()
+            if "passed" in line_lower or "failed" in line_lower or "error" in line_lower:
+                import re
+                for match in re.finditer(r"(\d+) (passed|failed|error)", line_lower):
+                    count = int(match.group(1))
+                    kind = match.group(2)
+                    if kind == "passed":
+                        passed = count
+                    elif kind == "failed":
+                        failed = count
+                    elif kind == "error":
+                        errors = count
+
+        total = passed + failed + errors
+        if failed > 0 or errors > 0:
+            status = "FAILED"
+            # Truncate output to last 200 lines on failure
+            lines = output.splitlines()
+            if len(lines) > 200:
+                output = "\n".join(["... (truncated)"] + lines[-200:])
+        else:
+            status = "PASSED" if proc.returncode == 0 else "ERROR"
+
+        return {
+            "passed": passed,
+            "failed": failed,
+            "errors": errors,
+            "total": total,
+            "status": status,
+            "output": output,
+            "tests_run": test_files,
+            "duration_seconds": round(duration, 2),
+        }
+
+    except subprocess.TimeoutExpired:
+        duration = time.monotonic() - start
+        return {
+            "passed": 0, "failed": 0, "errors": 0, "total": 0,
+            "status": "TIMEOUT",
+            "output": f"pytest timed out after {timeout}s",
+            "tests_run": test_files,
+            "duration_seconds": round(duration, 2),
+        }
+    except FileNotFoundError:
+        return {
+            "passed": 0, "failed": 0, "errors": 0, "total": 0,
+            "status": "ERROR",
+            "output": "pytest not found — is it installed in the target environment?",
+            "tests_run": test_files,
+            "duration_seconds": 0.0,
+        }
+
+
+def format_test_results(results: dict[str, Any]) -> str:
+    """Format test execution results for inclusion in review context.
+
+    Args:
+        results: Output from ``run_tests_for_files()``.
+
+    Returns:
+        Markdown-formatted string summarizing test results.
+
+    Example::
+
+        >>> print(format_test_results({"status": "PASSED", "passed": 5, ...}))
+        ## Test Execution Results
+        Status: PASSED (5 passed, 0 failed, 0 errors) in 1.2s
+    """
+    status = results.get("status", "UNKNOWN")
+    passed = results.get("passed", 0)
+    failed = results.get("failed", 0)
+    errors = results.get("errors", 0)
+    duration = results.get("duration_seconds", 0)
+    tests_run = results.get("tests_run", [])
+
+    lines = [
+        "## Test Execution Results",
+        f"Status: {status} ({passed} passed, {failed} failed, {errors} errors) in {duration}s",
+    ]
+
+    if tests_run:
+        lines.append(f"Tests run for: {', '.join(tests_run)}")
+
+    if status in ("FAILED", "ERROR", "TIMEOUT"):
+        output = results.get("output", "")
+        if output:
+            lines.append("")
+            lines.append("### Output:")
+            lines.append(f"```\n{output}\n```")
+
+    return "\n".join(lines)
+
+
+async def related_test_files(file_path: str, repo_path: str) -> dict[str, Any]:
+    """Find test files related to a specific source file.
+
+    Observation tool wrapper — discovers test files by naming convention and
+    import scanning, then returns their paths and which symbols they reference.
+
+    Args:
+        file_path: Source file path (relative to repo_path).
+        repo_path: Repository root path.
+
+    Returns:
+        Dict with discovered test file paths and reference info.
+    """
+    module_name = Path(file_path).stem
+
+    tests: set[str] = set()
+    tests.update(await _find_test_files_by_naming(module_name, repo_path))
+    tests.update(await _find_test_files_by_imports(module_name, file_path, repo_path))
+
+    # Also check coverage map
+    try:
+        cov_result = await coverage_map_tests(file_path, repo_path)
+        if "error" not in cov_result and cov_result.get("tests"):
+            for test_entry in cov_result["tests"]:
+                if isinstance(test_entry, str) and "::" in test_entry:
+                    tests.add(test_entry.split("::")[0])
+                elif isinstance(test_entry, str) and test_entry.endswith(".py"):
+                    tests.add(test_entry)
+    except Exception:
+        pass
+
+    test_info: list[dict[str, Any]] = []
+    for test_path in sorted(tests):
+        full = Path(repo_path) / test_path
+        info: dict[str, Any] = {"path": test_path, "exists": full.exists()}
+        if full.exists():
+            try:
+                info["line_count"] = len(full.read_text().splitlines())
+            except Exception:
+                pass
+        test_info.append(info)
+
+    return {
+        "source_file": file_path,
+        "test_files": test_info,
+        "test_count": len(test_info),
+    }
+
+
 async def file_imports(file_path: str, repo_path: str | None = None) -> dict[str, Any]:
     """
     Extract import statements from a Python file.
@@ -820,6 +1382,7 @@ OBSERVATION_TOOLS: dict[str, Any] = {
     "function_body": function_body,
     "file_imports": file_imports,
     "project_dependencies": project_dependencies,
+    "related_test_files": related_test_files,
 }
 
 

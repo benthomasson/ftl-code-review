@@ -27,6 +27,7 @@ Do NOT render verdicts yet. Only request observations.
 | `function_body` | Full source of a function/method | Need complete function context beyond diff hunks |
 | `file_imports` | Extract imports from a file | Verify import changes, check dependencies |
 | `project_dependencies` | Get pyproject.toml/requirements.txt | Verify new imports have dependencies |
+| `related_test_files` | Find test files for a source file | Discover tests by naming, imports, and coverage map |
 
 ## What to Look For
 
