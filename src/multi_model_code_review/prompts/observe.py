@@ -24,6 +24,7 @@ Do NOT render verdicts yet. Only request observations.
 | `test_coverage` | Find tests for a file (uses coverage-map if available) | Test coverage claims |
 | `coverage_map_tests` | Find tests covering a file (from coverage-map.json) | Precise test coverage from actual execution |
 | `coverage_map_files` | Find files covered by tests matching a pattern | Impact analysis for test changes |
+| `function_body` | Full source of a function/method | Need complete function context beyond diff hunks |
 | `file_imports` | Extract imports from a file | Verify import changes, check dependencies |
 | `project_dependencies` | Get pyproject.toml/requirements.txt | Verify new imports have dependencies |
 
@@ -65,6 +66,13 @@ For a diff adding a new function that calls `oauth_client.get_access_token()`:
 ```json
 [
   {{"name": "oauth_exceptions", "tool": "raises_analysis", "params": {{"file_path": "src/auth/oauth.py", "function_name": "get_access_token"}}}}
+]
+```
+
+For a diff modifying a method but you need the full function to verify:
+```json
+[
+  {{"name": "full_getattr", "tool": "function_body", "params": {{"file_path": "src/proxy.py", "function_name": "__getattr__"}}}}
 ]
 ```
 

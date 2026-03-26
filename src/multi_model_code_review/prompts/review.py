@@ -75,6 +75,7 @@ REASONING: <brief explanation of your assessment>
 
 ## Important
 
+- Full function bodies for modified functions may be available in the observations section — use them to verify the complete logic, not just the diff hunks
 - Focus on actual issues, not style preferences
 - If a method signature is added but callers aren't updated, that's PARTIAL integration
 - Be specific in reasoning - reference line numbers or function names

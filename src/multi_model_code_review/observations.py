@@ -496,6 +496,200 @@ async def coverage_map_files(test_pattern: str, repo_path: str) -> dict[str, Any
         return {"error": str(e), "pattern": test_pattern}
 
 
+async def function_body(
+    file_path: str,
+    line_hint: int | None = None,
+    function_name: str | None = None,
+    repo_path: str | None = None,
+) -> dict[str, Any]:
+    """
+    Extract the full source of a function or method from a Python file.
+
+    Finds the function either by name or by a line number that falls within it.
+    For methods, includes the enclosing class name for context.
+
+    Args:
+        file_path: Path to the Python file (relative to repo_path or absolute).
+        line_hint: A line number inside the target function. The innermost
+            function/method containing this line is returned.
+        function_name: Name of the function to find (searched depth-first).
+            Ignored when *line_hint* is provided.
+        repo_path: Base path for resolving relative *file_path* values.
+
+    Returns:
+        Dict with keys ``function``, ``file``, ``start_line``, ``end_line``,
+        ``class_name`` (if a method), and ``source`` (full function text).
+        On error, returns a dict with an ``error`` key.
+
+    Example::
+
+        >>> import asyncio
+        >>> result = asyncio.run(function_body("cli.py", function_name="review_loop"))
+        >>> result["start_line"]
+        945
+    """
+    if line_hint is None and function_name is None:
+        return {"error": "Provide either line_hint or function_name", "file": file_path}
+
+    try:
+        if repo_path and not Path(file_path).is_absolute():
+            full_path = Path(repo_path) / file_path
+        else:
+            full_path = Path(file_path)
+
+        source = full_path.read_text()
+        tree = ast.parse(source)
+        source_lines = source.splitlines()
+
+        # Collect all function/method nodes with their class context
+        functions: list[tuple[ast.FunctionDef | ast.AsyncFunctionDef, str | None]] = []
+
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ClassDef):
+                for child in ast.iter_child_nodes(node):
+                    if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                        functions.append((child, node.name))
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                # Top-level functions (avoid double-adding methods)
+                if not any(fn is node for fn, _ in functions):
+                    functions.append((node, None))
+
+        target: ast.FunctionDef | ast.AsyncFunctionDef | None = None
+        class_name: str | None = None
+
+        if line_hint is not None:
+            # Find the innermost function containing this line
+            best: ast.FunctionDef | ast.AsyncFunctionDef | None = None
+            best_class: str | None = None
+            for fn, cls in functions:
+                if fn.lineno <= line_hint <= (fn.end_lineno or fn.lineno):
+                    if best is None or fn.lineno >= best.lineno:
+                        best = fn
+                        best_class = cls
+            target = best
+            class_name = best_class
+        else:
+            # Find by name (first match, depth-first)
+            for fn, cls in functions:
+                if fn.name == function_name:
+                    target = fn
+                    class_name = cls
+                    break
+
+        if target is None:
+            search = f"line {line_hint}" if line_hint else f"'{function_name}'"
+            return {
+                "error": f"No function found at {search}",
+                "file": str(file_path),
+            }
+
+        start = target.lineno
+        # Include decorators (e.g. @property, @retry) — they affect behavior
+        if target.decorator_list:
+            start = target.decorator_list[0].lineno
+        end = target.end_lineno or start
+        # Cap very large functions to avoid blowing up context
+        max_lines = 200
+        body_lines = source_lines[start - 1 : end]
+        truncated = len(body_lines) > max_lines
+        if truncated:
+            body_lines = body_lines[:max_lines]
+
+        result: dict[str, Any] = {
+            "function": target.name,
+            "file": str(file_path),
+            "start_line": start,
+            "end_line": end,
+            "source": "\n".join(body_lines),
+        }
+        if class_name:
+            result["class_name"] = class_name
+        if truncated:
+            result["truncated"] = True
+            result["total_lines"] = end - start + 1
+        return result
+
+    except SyntaxError as e:
+        return {"error": f"Syntax error parsing {file_path}: {e}", "file": str(file_path)}
+    except Exception as e:
+        return {"error": str(e), "file": str(file_path)}
+
+
+async def gather_function_context(
+    diff_content: str,
+    repo_path: str,
+) -> dict[str, Any]:
+    """
+    Automatically find all modified Python functions and return their full bodies.
+
+    Combines diff parsing (to find touched line ranges) with AST-based function
+    extraction.  This is the main entry point for the "show full function bodies"
+    feature — it requires no reviewer action.
+
+    Args:
+        diff_content: Unified diff output.
+        repo_path: Repository root so relative paths can be resolved.
+
+    Returns:
+        Dict mapping descriptive keys (``"file.py:function_name"``) to
+        ``function_body()`` results.
+    """
+    from .git_utils import extract_modified_line_ranges
+
+    ranges = extract_modified_line_ranges(diff_content)
+    results: dict[str, Any] = {}
+    tasks: list[tuple[str, asyncio.Task]] = []
+
+    for file_path, line_ranges in ranges.items():
+        if not file_path.endswith(".py"):
+            continue
+
+        full_path = Path(repo_path) / file_path
+        if not full_path.exists():
+            continue
+
+        # For each touched range, find the enclosing function
+        seen_functions: set[str] = set()
+        for start, end in line_ranges:
+            # Use the midpoint as a hint — function_body finds the innermost
+            # function containing the line
+            for line in (start, end):
+                key = f"{file_path}:{line}"
+                if key not in seen_functions:
+                    seen_functions.add(key)
+                    tasks.append((
+                        file_path,
+                        asyncio.ensure_future(
+                            function_body(file_path, line_hint=line, repo_path=repo_path)
+                        ),
+                    ))
+
+    if not tasks:
+        return results
+
+    awaited = await asyncio.gather(*(t for _, t in tasks), return_exceptions=True)
+
+    # Deduplicate by (file, function_name, start_line)
+    seen: set[tuple[str, str, int]] = set()
+    for (file_path, _), result in zip(tasks, awaited):
+        if isinstance(result, Exception):
+            continue
+        if "error" in result:
+            continue
+        fn_name = result.get("function", "")
+        start = result.get("start_line", 0)
+        dedup_key = (file_path, fn_name, start)
+        if dedup_key in seen:
+            continue
+        seen.add(dedup_key)
+
+        class_prefix = f"{result['class_name']}." if result.get("class_name") else ""
+        obs_key = f"{file_path}:{class_prefix}{fn_name}"
+        results[obs_key] = result
+
+    return results
+
+
 async def file_imports(file_path: str, repo_path: str | None = None) -> dict[str, Any]:
     """
     Extract import statements from a Python file.
@@ -623,6 +817,7 @@ OBSERVATION_TOOLS: dict[str, Any] = {
     "test_coverage": test_coverage,
     "coverage_map_tests": coverage_map_tests,
     "coverage_map_files": coverage_map_files,
+    "function_body": function_body,
     "file_imports": file_imports,
     "project_dependencies": project_dependencies,
 }

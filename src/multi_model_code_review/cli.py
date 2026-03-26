@@ -12,7 +12,7 @@ from .aggregator import aggregate_reviews
 from .git_utils import extract_changed_files, fetch_pr_locally, get_diff, get_github_issue, get_pr_diff, post_pr_comment, pr_output_dir_name, read_file_content
 from .lint import get_changed_python_files, run_lint_checks, run_lint_fixes
 from .fixer import fix_blocks as fix_blocks_async
-from .observations import coverage_map_tests, run_observations
+from .observations import coverage_map_tests, gather_function_context, run_observations
 from .prompts import build_observe_prompt, build_review_prompt, build_spec_check_prompt
 from .report import format_aggregate_review, format_summary
 from .reviewer import (
@@ -1052,6 +1052,18 @@ def review_loop(branch, base, pr, repo, spec, model, output, output_dir, max_ite
             with open(os.path.join(output_dir, "00-auto-coverage.json"), "w") as f:
                 json.dump(all_observations, f, indent=2, default=str)
             click.echo(f"Auto-lookup found tests for {len(all_observations)} file(s)", err=True)
+
+    # Auto-gather full function bodies for modified functions
+    if repo != ".":
+        click.echo("Auto-gathering modified function bodies...", err=True)
+        fn_context = asyncio.run(gather_function_context(diff_content, repo))
+        if fn_context:
+            all_observations.update(fn_context)
+            click.echo(f"Auto-gathered {len(fn_context)} function body(ies):", err=True)
+            for key in fn_context:
+                click.echo(f"  {key}", err=True)
+            with open(os.path.join(output_dir, "00-auto-functions.json"), "w") as f:
+                json.dump(fn_context, f, indent=2, default=str)
 
     for iteration in range(1, max_iterations + 1):
         click.echo(f"\n=== Iteration {iteration}/{max_iterations} ===", err=True)

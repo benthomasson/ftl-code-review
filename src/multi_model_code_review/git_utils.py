@@ -327,3 +327,54 @@ def extract_changed_files(diff_content: str) -> list[str]:
             if path != "/dev/null":  # Exclude deleted files
                 files.append(path)
     return files
+
+
+def extract_modified_line_ranges(diff_content: str) -> dict[str, list[tuple[int, int]]]:
+    """
+    Parse a unified diff to extract modified line ranges in the new version of each file.
+
+    Parses ``@@ -a,b +c,d @@`` hunk headers to determine which lines were
+    touched.  Returns ranges in the **new** file (the ``+`` side).
+
+    Args:
+        diff_content: Unified diff output (e.g. from ``git diff``)
+
+    Returns:
+        Dict mapping file paths to lists of ``(start_line, end_line)`` tuples
+        representing modified regions in the new file.
+
+    Example::
+
+        >>> diff = '''diff --git a/foo.py b/foo.py
+        ... --- a/foo.py
+        ... +++ b/foo.py
+        ... @@ -10,4 +10,6 @@ def hello():
+        ...  unchanged
+        ... +added line 1
+        ... +added line 2
+        ...  unchanged
+        ... '''
+        >>> extract_modified_line_ranges(diff)
+        {'foo.py': [(10, 15)]}
+    """
+    result: dict[str, list[tuple[int, int]]] = {}
+    current_file: str | None = None
+
+    for line in diff_content.split("\n"):
+        # Track current file from "+++ b/..." lines
+        if line.startswith("+++ b/"):
+            path = line[6:]
+            current_file = path if path != "/dev/null" else None
+            continue
+
+        # Parse hunk headers: @@ -old_start,old_count +new_start,new_count @@
+        if current_file and line.startswith("@@"):
+            m = re.match(r"@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@", line)
+            if m:
+                start = int(m.group(1))
+                count = int(m.group(2)) if m.group(2) else 1
+                if count > 0:
+                    end = start + count - 1
+                    result.setdefault(current_file, []).append((start, end))
+
+    return result
