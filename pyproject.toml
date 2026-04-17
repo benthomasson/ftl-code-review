@@ -1,6 +1,6 @@
 [project]
 name = "ftl-code-review"
-version = "0.9.1"
+version = "0.9.2"
 description = "AI-first code review using multiple models to surface issues before human review"
 readme = "README.md"
 license = { text = "MIT" }
