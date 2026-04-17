@@ -148,7 +148,13 @@ def cli():
     default=False,
     help="Post review as a comment on the PR (requires --pr)",
 )
-def review(branch, base, pr, repo, spec, model, output, output_dir, lint, fix_lint, observations, beliefs, issue, github_issue, comment):
+@click.option(
+    "--timeout",
+    type=int,
+    default=None,
+    help="Timeout in seconds per model invocation (default: 300)",
+)
+def review(branch, base, pr, repo, spec, model, output, output_dir, lint, fix_lint, observations, beliefs, issue, github_issue, comment, timeout):
     """Run code review with multiple models."""
     import os
 
@@ -258,7 +264,7 @@ def review(branch, base, pr, repo, spec, model, output, output_dir, lint, fix_li
 
     # Run reviews
     click.echo(f"Running review with {', '.join(models)}...", err=True)
-    reviews = asyncio.run(review_with_models(models, prompt, observations=obs_data))
+    reviews = asyncio.run(review_with_models(models, prompt, observations=obs_data, timeout=timeout))
 
     # Aggregate
     result = aggregate_reviews(diff_ref, reviews, spec)

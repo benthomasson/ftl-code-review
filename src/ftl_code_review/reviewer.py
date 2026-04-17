@@ -364,6 +364,7 @@ async def review_with_model(
     model: str,
     prompt: str,
     observations: dict | None = None,
+    timeout: int | None = None,
 ) -> ModelReview:
     """
     Run review with a single model.
@@ -372,12 +373,13 @@ async def review_with_model(
         model: Model name
         prompt: Review prompt
         observations: Optional observation results to include in review
+        timeout: Timeout in seconds (default: DEFAULT_TIMEOUT)
 
     Returns:
         Parsed ModelReview
     """
     try:
-        response = await run_model(model, prompt)
+        response = await run_model(model, prompt, timeout=timeout or DEFAULT_TIMEOUT)
         review = parse_review_response(model, response)
 
         if observations:
@@ -405,6 +407,7 @@ async def review_with_models(
     models: list[str],
     prompt: str,
     observations: dict | None = None,
+    timeout: int | None = None,
 ) -> list[ModelReview]:
     """
     Run review with multiple models concurrently.
@@ -413,12 +416,13 @@ async def review_with_models(
         models: List of model names
         prompt: Review prompt (same for all models)
         observations: Optional observation results to include
+        timeout: Timeout in seconds per model (default: DEFAULT_TIMEOUT)
 
     Returns:
         List of ModelReview, one per model
     """
     tasks = [
-        review_with_model(model, prompt, observations)
+        review_with_model(model, prompt, observations, timeout=timeout)
         for model in models
     ]
     return await asyncio.gather(*tasks)
