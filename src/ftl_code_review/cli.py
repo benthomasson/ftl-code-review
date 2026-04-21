@@ -10,6 +10,7 @@ import json
 
 from . import Verdict
 from .aggregator import aggregate_reviews
+from .beliefs import filter_beliefs
 from .git_utils import extract_changed_files, fetch_pr_locally, get_diff, get_github_issue, get_pr_diff, post_pr_comment, pr_output_dir_name, read_file_content
 from .lint import check_test_discoverability, get_changed_python_files, run_lint_checks, run_lint_fixes
 from .fixer import fix_blocks as fix_blocks_async
@@ -235,12 +236,13 @@ def review(branch, base, pr, repo, spec, model, output, output_dir, lint, fix_li
             obs_data = json.load(f)
         click.echo(f"Loaded {len(obs_data)} observation(s) from {observations}", err=True)
 
-    # Load beliefs if provided
+    # Load beliefs if provided (keyword-filtered to relevant entries)
     beliefs_content = None
     if beliefs:
-        beliefs_content = read_file_content(beliefs)
-        if beliefs_content:
-            click.echo(f"Loaded beliefs from {beliefs}", err=True)
+        raw_beliefs = read_file_content(beliefs)
+        if raw_beliefs:
+            beliefs_content, kept, total = filter_beliefs(raw_beliefs, diff_content)
+            click.echo(f"Loaded beliefs from {beliefs} ({kept}/{total} relevant)", err=True)
         else:
             click.echo(f"Warning: Could not read beliefs file: {beliefs}", err=True)
 
@@ -565,12 +567,13 @@ def gate(branch, base, pr, repo, spec, model, output_dir, lint, fix_lint, belief
     if spec:
         spec_content = read_file_content(spec)
 
-    # Load beliefs if provided
+    # Load beliefs if provided (keyword-filtered to relevant entries)
     beliefs_content = None
     if beliefs:
-        beliefs_content = read_file_content(beliefs)
-        if beliefs_content:
-            click.echo(f"Loaded beliefs from {beliefs}", err=True)
+        raw_beliefs = read_file_content(beliefs)
+        if raw_beliefs:
+            beliefs_content, kept, total = filter_beliefs(raw_beliefs, diff_content)
+            click.echo(f"Loaded beliefs from {beliefs} ({kept}/{total} relevant)", err=True)
         else:
             click.echo(f"Warning: Could not read beliefs file: {beliefs}", err=True)
 
@@ -1025,12 +1028,13 @@ def review_loop(branch, base, pr, repo, spec, model, output, output_dir, max_ite
         if spec_content is None:
             click.echo(f"Warning: Spec file not found: {spec}", err=True)
 
-    # Load beliefs if provided
+    # Load beliefs if provided (keyword-filtered to relevant entries)
     beliefs_content = None
     if beliefs:
-        beliefs_content = read_file_content(beliefs)
-        if beliefs_content:
-            click.echo(f"Loaded beliefs from {beliefs}", err=True)
+        raw_beliefs = read_file_content(beliefs)
+        if raw_beliefs:
+            beliefs_content, kept, total = filter_beliefs(raw_beliefs, diff_content)
+            click.echo(f"Loaded beliefs from {beliefs} ({kept}/{total} relevant)", err=True)
         else:
             click.echo(f"Warning: Could not read beliefs file: {beliefs}", err=True)
 
@@ -1467,12 +1471,13 @@ def files(paths, repo, spec, model, output_dir, glob, fix_blocks, beliefs, issue
         if spec_content is None:
             click.echo(f"Warning: Spec file not found: {spec}", err=True)
 
-    # Load beliefs if provided
+    # Load beliefs if provided (keyword-filtered to relevant entries)
     beliefs_content = None
     if beliefs:
-        beliefs_content = read_file_content(beliefs)
-        if beliefs_content:
-            click.echo(f"Loaded beliefs from {beliefs}", err=True)
+        raw_beliefs = read_file_content(beliefs)
+        if raw_beliefs:
+            beliefs_content, kept, total = filter_beliefs(raw_beliefs, diff_content)
+            click.echo(f"Loaded beliefs from {beliefs} ({kept}/{total} relevant)", err=True)
         else:
             click.echo(f"Warning: Could not read beliefs file: {beliefs}", err=True)
 
