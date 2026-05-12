@@ -110,17 +110,6 @@ def cli():
     help="Directory to save outputs (report.md + per-model raw responses)",
 )
 @click.option(
-    "--lint/--no-lint",
-    default=False,
-    help="Run lint checks (black, isort, ruff) before model review",
-)
-@click.option(
-    "--fix-lint",
-    is_flag=True,
-    default=False,
-    help="Auto-fix lint issues before model review",
-)
-@click.option(
     "--observations",
     type=click.Path(exists=True),
     default=None,
@@ -155,7 +144,7 @@ def cli():
     default=None,
     help="Timeout in seconds per model invocation (default: 300)",
 )
-def review(branch, base, pr, repo, spec, model, output, output_dir, lint, fix_lint, observations, beliefs, issue, github_issue, comment, timeout):
+def review(branch, base, pr, repo, spec, model, output, output_dir, observations, beliefs, issue, github_issue, comment, timeout):
     """Run code review with multiple models."""
     import os
 
@@ -173,24 +162,6 @@ def review(branch, base, pr, repo, spec, model, output, output_dir, lint, fix_li
             branch_id = (branch or "staged").replace("/", "-")
         output_dir = os.path.join("reviews", branch_id)
         click.echo(f"Saving review to {output_dir}/", err=True)
-
-    # Lint fix/check (pre-model gate) — skip for PR reviews (remote repo)
-    if (fix_lint or lint) and not pr:
-        py_files = get_changed_python_files(branch, base, cwd=repo)
-        if py_files:
-            if fix_lint:
-                click.echo(f"Fixing lint issues on {len(py_files)} files...", err=True)
-                fix_result = run_lint_fixes(py_files, cwd=repo)
-                if fix_result.total_fixed > 0:
-                    click.echo(fix_result.summary, err=True)
-
-            click.echo(f"Running lint checks on {len(py_files)} files...", err=True)
-            lint_result = run_lint_checks(py_files, cwd=repo)
-            if not lint_result.passed:
-                click.echo("Lint checks failed:", err=True)
-                click.echo(lint_result.summary, err=True)
-                sys.exit(2)
-            click.echo("Lint checks passed", err=True)
 
     # Preflight check
     missing = preflight_check(models)
