@@ -166,6 +166,10 @@ class TestParseGitLabIssueUrl:
     def test_number_only(self):
         assert _parse_gitlab_issue_url("3") == (None, 3)
 
+    def test_invalid_raises(self):
+        with pytest.raises(ValueError):
+            _parse_gitlab_issue_url("not-a-ref")
+
 
 # ---------------------------------------------------------------------------
 # Dispatch: public API routes to correct implementation
@@ -216,12 +220,14 @@ class TestFetchPrLocallyDispatch:
         mock_gh.return_value = ("feature", "main", "o/r#1")
         result = fetch_pr_locally("https://github.com/o/r/pull/1", "/tmp")
         mock_gh.assert_called_once_with("https://github.com/o/r/pull/1", "/tmp")
+        assert result == ("feature", "main", "o/r#1")
 
     @patch("ftl_code_review.git_utils._fetch_gitlab_mr_locally")
     def test_gitlab_url(self, mock_gl):
         mock_gl.return_value = ("feature", "main", "o/r!1")
         result = fetch_pr_locally("https://gitlab.com/o/r/-/merge_requests/1", "/tmp")
         mock_gl.assert_called_once_with("https://gitlab.com/o/r/-/merge_requests/1", "/tmp")
+        assert result == ("feature", "main", "o/r!1")
 
 
 class TestPostPrCommentDispatch:
@@ -242,12 +248,14 @@ class TestGetIssueDispatch:
         mock_gh.return_value = "## Title\n\nbody"
         result = get_github_issue("https://github.com/o/r/issues/1")
         mock_gh.assert_called_once_with("https://github.com/o/r/issues/1")
+        assert result == "## Title\n\nbody"
 
     @patch("ftl_code_review.git_utils._get_gitlab_issue_impl")
     def test_gitlab_url(self, mock_gl):
         mock_gl.return_value = "## Title\n\ndescription"
         result = get_github_issue("https://gitlab.com/o/r/-/issues/1")
         mock_gl.assert_called_once_with("https://gitlab.com/o/r/-/issues/1")
+        assert result == "## Title\n\ndescription"
 
 
 # ---------------------------------------------------------------------------
