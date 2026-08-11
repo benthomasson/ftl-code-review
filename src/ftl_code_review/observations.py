@@ -2011,6 +2011,116 @@ async def generator_info(
         return {"error": str(e), "file": str(file_path)}
 
 
+async def reasons_search(
+    query: str, repo_path: str,
+) -> dict[str, Any]:
+    """Search beliefs in a reasons.db knowledge base.
+
+    Runs ``reasons search`` against the belief network to find claims
+    about the codebase that are relevant to the query.
+
+    Args:
+        query: Natural-language search query.
+        repo_path: Repository path (reasons.db must exist here).
+
+    Returns:
+        Dict with matching beliefs and their status.
+    """
+    import shutil
+
+    db_path = Path(repo_path) / "reasons.db"
+    if not db_path.exists():
+        return {"error": "No reasons.db found in repository", "query": query}
+
+    reasons_bin = shutil.which("reasons")
+    if not reasons_bin:
+        return {"error": "reasons CLI not found in PATH", "query": query}
+
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            reasons_bin, "--db", str(db_path), "search", query,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            cwd=repo_path,
+        )
+        try:
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=30)
+        except asyncio.TimeoutError:
+            proc.kill()
+            return {"error": "reasons search timed out", "query": query}
+
+        if proc.returncode != 0:
+            return {"error": f"reasons search failed: {stderr.decode()[:200]}", "query": query}
+
+        return {
+            "query": query,
+            "results": stdout.decode().strip(),
+        }
+    except Exception as e:
+        return {"error": str(e), "query": query}
+
+
+async def gather_reasons_beliefs(
+    changed_files: list[str], repo_path: str,
+) -> dict[str, Any]:
+    """Auto-gather beliefs from reasons.db related to changed files.
+
+    For each changed file, runs a semantic search to find beliefs that
+    mention it or its key symbols.
+
+    Args:
+        changed_files: List of changed file paths (relative to repo).
+        repo_path: Repository root containing reasons.db.
+
+    Returns:
+        Dict mapping descriptive keys to search results.
+    """
+    import shutil
+
+    db_path = Path(repo_path) / "reasons.db"
+    if not db_path.exists():
+        return {}
+
+    reasons_bin = shutil.which("reasons")
+    if not reasons_bin:
+        return {}
+
+    generic_stems = {
+        "__init__", "utils", "helpers", "common", "types", "main",
+        "index", "app", "core", "base", "models", "api", "config",
+        "setup", "conftest", "fixtures",
+    }
+
+    results: dict[str, Any] = {}
+    tasks: list[tuple[str, asyncio.Task]] = []
+
+    for file_path in changed_files:
+        stem = Path(file_path).stem
+        query = file_path if stem in generic_stems else f"{file_path} {stem}"
+        tasks.append((
+            file_path,
+            asyncio.ensure_future(
+                reasons_search(query, repo_path)
+            ),
+        ))
+
+    if not tasks:
+        return results
+
+    awaited = await asyncio.gather(*(t for _, t in tasks), return_exceptions=True)
+
+    for (file_path, _), result in zip(tasks, awaited):
+        if isinstance(result, Exception):
+            continue
+        if "error" in result:
+            continue
+        search_results = result.get("results", "")
+        if search_results.strip():
+            results[f"beliefs:{file_path}"] = result
+
+    return results
+
+
 # Registry of all observation tools
 OBSERVATION_TOOLS: dict[str, Any] = {
     "exception_hierarchy": exception_hierarchy,
@@ -2029,6 +2139,7 @@ OBSERVATION_TOOLS: dict[str, Any] = {
     "class_hierarchy": class_hierarchy,
     "symbol_migration": symbol_migration,
     "generator_info": generator_info,
+    "reasons_search": reasons_search,
 }
 
 
