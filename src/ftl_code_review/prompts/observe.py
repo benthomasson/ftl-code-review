@@ -32,6 +32,7 @@ Do NOT render verdicts yet. Only request observations.
 | `class_hierarchy` | Show base classes and their `__init__` signatures | Class changes its parent, modifies `__init__`, or uses `super()` |
 | `symbol_migration` | Check if a rename is complete across the repo | Symbol renamed in diff — verify old name is fully removed |
 | `generator_info` | Report whether a function uses `yield` | Function might be a generator — affects return value semantics |
+| `reasons_search` | Search beliefs in reasons.db knowledge base | Find verified claims about the codebase — architecture, invariants, known bugs |
 
 ## What to Look For
 
@@ -124,6 +125,13 @@ For a diff modifying a function that might be a generator:
 ```json
 [
   {{"name": "process_gen", "tool": "generator_info", "params": {{"file_path": "src/pipeline.py", "function_name": "process_items"}}}}
+]
+```
+
+For a diff touching thread safety or concurrency and you want to check if there are known beliefs about it:
+```json
+[
+  {{"name": "thread_safety_beliefs", "tool": "reasons_search", "params": {{"query": "thread safety concurrency"}}}}
 ]
 ```
 

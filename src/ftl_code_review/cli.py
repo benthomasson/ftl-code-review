@@ -14,7 +14,7 @@ from .beliefs import filter_beliefs
 from .git_utils import extract_changed_files, fetch_pr_locally, get_diff, get_github_issue, get_pr_diff, post_pr_comment, pr_output_dir_name, read_file_content
 from .lint import check_test_discoverability, get_changed_python_files, run_lint_checks, run_lint_fixes
 from .fixer import fix_blocks as fix_blocks_async
-from .observations import coverage_map_tests, file_imports, format_test_results, gather_function_context, gather_related_test_files, run_observations, run_tests_for_files
+from .observations import coverage_map_tests, file_imports, format_test_results, gather_function_context, gather_reasons_beliefs, gather_related_test_files, run_observations, run_tests_for_files
 from .prompts import build_observe_prompt, build_review_prompt, build_spec_check_prompt
 from .report import format_aggregate_review, format_summary
 from .reviewer import (
@@ -1151,6 +1151,20 @@ def review_loop(branch, base, pr, repo, spec, model, output, output_dir, max_ite
                     ref_result = asyncio.run(file_imports(ref_path, repo_path=repo))
                     all_observations[obs_key] = ref_result
                     click.echo(f"  {ref_path}: {len(ref_result.get('imports', []))} imports", err=True)
+
+    # Auto-gather beliefs from reasons.db for changed files
+    if repo != "." and (Path(repo) / "reasons.db").exists():
+        click.echo("Auto-gathering beliefs from reasons.db...", err=True)
+        reasons_obs = asyncio.run(gather_reasons_beliefs(changed_files, repo))
+        if reasons_obs:
+            all_observations.update(reasons_obs)
+            click.echo(f"Found beliefs for {len(reasons_obs)} file(s):", err=True)
+            for key in reasons_obs:
+                click.echo(f"  {key}", err=True)
+            with open(os.path.join(output_dir, "00-auto-beliefs.json"), "w") as f:
+                json.dump(reasons_obs, f, indent=2, default=str)
+        else:
+            click.echo("No relevant beliefs found in reasons.db.", err=True)
 
     # Run tests if requested
     if run_tests and python_files:
