@@ -934,7 +934,13 @@ def models():
     default=False,
     help="Auto-run 'coverage-map collect' if coverage-map.json is missing or stale",
 )
-def review_loop(branch, base, pr, repo, spec, model, output, output_dir, max_iterations, beliefs, issue, github_issue, comment, run_tests, use_coverage_map):
+@click.option(
+    "--reasons-db",
+    type=click.Path(exists=True),
+    default=None,
+    help="Path to reasons.db for belief-aware review (auto-detected in repo root if not set)",
+)
+def review_loop(branch, base, pr, repo, spec, model, output, output_dir, max_iterations, beliefs, issue, github_issue, comment, run_tests, use_coverage_map, reasons_db):
     """
     Run automated observe/review loop.
 
@@ -1154,9 +1160,14 @@ def review_loop(branch, base, pr, repo, spec, model, output, output_dir, max_ite
 
     # Auto-gather beliefs from reasons.db for changed files
     abs_repo = os.path.abspath(repo)
-    if (Path(abs_repo) / "reasons.db").exists():
-        click.echo("Auto-gathering beliefs from reasons.db...", err=True)
-        reasons_obs = asyncio.run(gather_reasons_beliefs(changed_files, abs_repo))
+    resolved_db = None
+    if reasons_db:
+        resolved_db = os.path.abspath(reasons_db)
+    elif (Path(abs_repo) / "reasons.db").exists():
+        resolved_db = os.path.join(abs_repo, "reasons.db")
+    if resolved_db:
+        click.echo(f"Auto-gathering beliefs from {resolved_db}...", err=True)
+        reasons_obs = asyncio.run(gather_reasons_beliefs(changed_files, abs_repo, db_path=resolved_db))
         if reasons_obs:
             all_observations.update(reasons_obs)
             click.echo(f"Found beliefs for {len(reasons_obs)} file(s):", err=True)

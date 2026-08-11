@@ -2012,7 +2012,7 @@ async def generator_info(
 
 
 async def reasons_search(
-    query: str, repo_path: str,
+    query: str, repo_path: str, db_path: str | None = None,
 ) -> dict[str, Any]:
     """Search beliefs in a reasons.db knowledge base.
 
@@ -2021,16 +2021,17 @@ async def reasons_search(
 
     Args:
         query: Natural-language search query.
-        repo_path: Repository path (reasons.db must exist here).
+        repo_path: Repository path (used as cwd and default db location).
+        db_path: Explicit path to reasons.db (default: repo_path/reasons.db).
 
     Returns:
         Dict with matching beliefs and their status.
     """
     import shutil
 
-    db_path = Path(repo_path) / "reasons.db"
-    if not db_path.exists():
-        return {"error": "No reasons.db found in repository", "query": query}
+    resolved_db = db_path or str(Path(repo_path) / "reasons.db")
+    if not Path(resolved_db).exists():
+        return {"error": f"No reasons.db found at {resolved_db}", "query": query}
 
     reasons_bin = shutil.which("reasons")
     if not reasons_bin:
@@ -2038,7 +2039,7 @@ async def reasons_search(
 
     try:
         proc = await asyncio.create_subprocess_exec(
-            reasons_bin, "--db", str(db_path), "search", query,
+            reasons_bin, "--db", resolved_db, "search", query,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             cwd=repo_path,
@@ -2061,7 +2062,7 @@ async def reasons_search(
 
 
 async def gather_reasons_beliefs(
-    changed_files: list[str], repo_path: str,
+    changed_files: list[str], repo_path: str, db_path: str | None = None,
 ) -> dict[str, Any]:
     """Auto-gather beliefs from reasons.db related to changed files.
 
@@ -2070,15 +2071,16 @@ async def gather_reasons_beliefs(
 
     Args:
         changed_files: List of changed file paths (relative to repo).
-        repo_path: Repository root containing reasons.db.
+        repo_path: Repository root (used as cwd for searches).
+        db_path: Explicit path to reasons.db (default: repo_path/reasons.db).
 
     Returns:
         Dict mapping descriptive keys to search results.
     """
     import shutil
 
-    db_path = Path(repo_path) / "reasons.db"
-    if not db_path.exists():
+    resolved_db = db_path or str(Path(repo_path) / "reasons.db")
+    if not Path(resolved_db).exists():
         return {}
 
     reasons_bin = shutil.which("reasons")
@@ -2100,7 +2102,7 @@ async def gather_reasons_beliefs(
         tasks.append((
             file_path,
             asyncio.ensure_future(
-                reasons_search(query, repo_path)
+                reasons_search(query, repo_path, db_path=resolved_db)
             ),
         ))
 
