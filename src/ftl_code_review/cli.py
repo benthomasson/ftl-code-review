@@ -1153,9 +1153,10 @@ def review_loop(branch, base, pr, repo, spec, model, output, output_dir, max_ite
                     click.echo(f"  {ref_path}: {len(ref_result.get('imports', []))} imports", err=True)
 
     # Auto-gather beliefs from reasons.db for changed files
-    if repo != "." and (Path(repo) / "reasons.db").exists():
+    abs_repo = os.path.abspath(repo)
+    if (Path(abs_repo) / "reasons.db").exists():
         click.echo("Auto-gathering beliefs from reasons.db...", err=True)
-        reasons_obs = asyncio.run(gather_reasons_beliefs(changed_files, repo))
+        reasons_obs = asyncio.run(gather_reasons_beliefs(changed_files, abs_repo))
         if reasons_obs:
             all_observations.update(reasons_obs)
             click.echo(f"Found beliefs for {len(reasons_obs)} file(s):", err=True)

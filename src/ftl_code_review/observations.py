@@ -2085,12 +2085,18 @@ async def gather_reasons_beliefs(
     if not reasons_bin:
         return {}
 
+    generic_stems = {
+        "__init__", "utils", "helpers", "common", "types", "main",
+        "index", "app", "core", "base", "models", "api", "config",
+        "setup", "conftest", "fixtures",
+    }
+
     results: dict[str, Any] = {}
     tasks: list[tuple[str, asyncio.Task]] = []
 
     for file_path in changed_files:
         stem = Path(file_path).stem
-        query = f"{file_path} {stem}"
+        query = file_path if stem in generic_stems else f"{file_path} {stem}"
         tasks.append((
             file_path,
             asyncio.ensure_future(
