@@ -19,6 +19,7 @@ from ftl_code_review.reviewer import (
     parse_spec_compliance,
     parse_test_coverage,
     parse_verdict,
+    run_model,
 )
 
 
@@ -30,6 +31,29 @@ class TestOpenAIAvailability:
     def test_uses_api_key(self, monkeypatch):
         monkeypatch.setenv("OPENAI_API_KEY", "test-key")
         assert check_model_available("openai")
+        assert check_model_available("openai:gpt-5.6-luna")
+
+    def test_model_spec_is_sent_to_openai(self, monkeypatch):
+        monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+        captured = {}
+
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                pass
+
+            def read(self):
+                return b'{"choices":[{"message":{"content":"ok"}}]}'
+
+        def fake_urlopen(request, timeout):
+            captured["body"] = request.data
+            return Response()
+
+        monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+        assert asyncio.run(run_model("openai:gpt-5.6-luna", "prompt", timeout=1)) == "ok"
+        assert b'"model": "gpt-5.6-luna"' in captured["body"]
 
     def test_timeout_cancellation_does_not_wait_for_request(self, monkeypatch):
         monkeypatch.setenv("OPENAI_API_KEY", "test-key")

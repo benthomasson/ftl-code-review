@@ -36,13 +36,25 @@ OPENAI_MODEL = "gpt-4o-mini"
 DEFAULT_TIMEOUT = 300
 
 
+def _model_provider(model: str) -> tuple[str, str | None]:
+    """Return the provider and optional model name from a model spec.
+
+    API providers may be selected as ``openai:model-name`` while the plain
+    ``openai`` form continues to use ``OPENAI_MODEL`` (or its default).
+    CLI providers do not currently accept a model suffix.
+    """
+    provider, separator, model_name = model.partition(":")
+    return provider, (model_name or None) if separator else None
+
+
 def check_model_available(model: str) -> bool:
     """Check whether a model provider is configured and available."""
-    if model in API_MODELS:
+    provider, _ = _model_provider(model)
+    if provider in API_MODELS:
         return bool(os.environ.get("OPENAI_API_KEY"))
-    if model not in MODEL_COMMANDS:
+    if provider not in MODEL_COMMANDS or model != provider:
         return False
-    cmd = MODEL_COMMANDS[model][0]
+    cmd = MODEL_COMMANDS[provider][0]
     return shutil.which(cmd) is not None
 
 
@@ -55,12 +67,12 @@ def preflight_check(models: list[str]) -> list[str]:
     return missing
 
 
-async def _run_openai(prompt: str, timeout: int) -> str:
+async def _run_openai(prompt: str, timeout: int, model_name: str | None = None) -> str:
     """Invoke OpenAI's chat completions API without requiring an SDK."""
     api_key = os.environ.get("OPENAI_API_KEY")
     if not api_key:
         raise RuntimeError("OPENAI_API_KEY is not set")
-    model_name = os.environ.get("OPENAI_MODEL", OPENAI_MODEL)
+    model_name = model_name or os.environ.get("OPENAI_MODEL", OPENAI_MODEL)
     payload = json.dumps({
         "model": model_name,
         "messages": [{"role": "user", "content": prompt}],
@@ -139,17 +151,18 @@ async def run_model(model: str, prompt: str, timeout: int = DEFAULT_TIMEOUT) -> 
         TimeoutError: If model doesn't respond in time
         RuntimeError: If model invocation fails
     """
-    if model in API_MODELS:
+    provider, requested_model = _model_provider(model)
+    if provider in API_MODELS:
         try:
-            return await _run_openai(prompt, timeout)
+            return await _run_openai(prompt, timeout, requested_model)
         except asyncio.TimeoutError:
             raise TimeoutError(f"Model {model} timed out after {timeout}s") from None
 
-    if model not in MODEL_COMMANDS:
+    if provider not in MODEL_COMMANDS or model != provider:
         available = [*MODEL_COMMANDS.keys(), *API_MODELS]
         raise ValueError(f"Unknown model: {model}. Available: {available}")
 
-    cmd = MODEL_COMMANDS[model]
+    cmd = MODEL_COMMANDS[provider]
 
     # Remove CLAUDECODE env var to allow nested claude invocation
     env = {k: v for k, v in os.environ.items() if k != "CLAUDECODE"}

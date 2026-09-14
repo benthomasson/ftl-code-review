@@ -62,11 +62,14 @@ code-review review --observations obs.json  # With pre-gathered observations
 
 # Use OpenAI (requires OPENAI_API_KEY; optionally set OPENAI_MODEL)
 OPENAI_API_KEY=... code-review review -m openai
+# Select a model directly in the model spec
+OPENAI_API_KEY=... code-review review-loop -m openai:gpt-5.6-luna
 ```
 
 The `openai` provider uses the OpenAI Chat Completions API and defaults to
-`gpt-4o-mini`. Set `OPENAI_MODEL` to choose another compatible model. You can
-also set `OPENAI_API_URL` for a compatible API endpoint.
+`gpt-4o-mini`. Set `OPENAI_MODEL` to choose another compatible model, or use
+`openai:<model-name>` to select it on the command line. You can also set
+`OPENAI_API_URL` for a compatible API endpoint.
 
 ### observe
 
