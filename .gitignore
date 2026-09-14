@@ -9,3 +9,6 @@ build/
 reviews/
 uv.lock
 uv.lock
+*.db
+.forge
+.worker-bee
