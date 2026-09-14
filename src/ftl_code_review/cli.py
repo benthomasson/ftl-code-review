@@ -75,7 +75,7 @@ def cli():
 @click.option(
     "--pr",
     default=None,
-    help="GitHub PR to review (URL, owner/repo#N, or number)",
+    help="PR/MR to review (GitHub/GitLab URL, owner/repo#N, or number)",
 )
 @click.option(
     "--repo",
@@ -131,13 +131,13 @@ def cli():
 @click.option(
     "--github-issue",
     default=None,
-    help="GitHub issue to check changes against (URL, owner/repo#N, or number)",
+    help="Issue to check against (GitHub/GitLab URL, owner/repo#N, or number)",
 )
 @click.option(
     "--comment",
     is_flag=True,
     default=False,
-    help="Post review as a comment on the PR (requires --pr)",
+    help="Post review as a comment on the PR/MR (requires --pr)",
 )
 @click.option(
     "--timeout",
@@ -223,9 +223,9 @@ def review(branch, base, pr, repo, spec, model, output, output_dir, observations
     if github_issue:
         try:
             issue_content = get_github_issue(github_issue)
-            click.echo(f"Fetched GitHub issue {github_issue}", err=True)
+            click.echo(f"Fetched issue {github_issue}", err=True)
         except (RuntimeError, ValueError) as e:
-            click.echo(f"Warning: Could not fetch GitHub issue: {e}", err=True)
+            click.echo(f"Warning: Could not fetch issue: {e}", err=True)
     elif issue:
         issue_content = read_file_content(issue)
         if issue_content:
@@ -401,7 +401,7 @@ def observe(branch, base, repo, model, output, run):
 @click.option(
     "--pr",
     default=None,
-    help="GitHub PR to review (URL, owner/repo#N, or number)",
+    help="PR/MR to review (GitHub/GitLab URL, owner/repo#N, or number)",
 )
 @click.option(
     "--repo",
@@ -455,13 +455,13 @@ def observe(branch, base, repo, model, output, run):
 @click.option(
     "--github-issue",
     default=None,
-    help="GitHub issue to check changes against (URL, owner/repo#N, or number)",
+    help="Issue to check against (GitHub/GitLab URL, owner/repo#N, or number)",
 )
 @click.option(
     "--comment",
     is_flag=True,
     default=False,
-    help="Post review as a comment on the PR (requires --pr)",
+    help="Post review as a comment on the PR/MR (requires --pr)",
 )
 def gate(branch, base, pr, repo, spec, model, output_dir, lint, fix_lint, beliefs, issue, github_issue, comment):
     """
@@ -555,9 +555,9 @@ def gate(branch, base, pr, repo, spec, model, output_dir, lint, fix_lint, belief
     if github_issue:
         try:
             issue_content = get_github_issue(github_issue)
-            click.echo(f"Fetched GitHub issue {github_issue}", err=True)
+            click.echo(f"Fetched issue {github_issue}", err=True)
         except (RuntimeError, ValueError) as e:
-            click.echo(f"Warning: Could not fetch GitHub issue: {e}", err=True)
+            click.echo(f"Warning: Could not fetch issue: {e}", err=True)
     elif issue:
         issue_content = read_file_content(issue)
         if issue_content:
@@ -625,7 +625,7 @@ def gate(branch, base, pr, repo, spec, model, output_dir, lint, fix_lint, belief
 @click.option(
     "--pr",
     default=None,
-    help="GitHub PR to review (URL, owner/repo#N, or number)",
+    help="PR/MR to review (GitHub/GitLab URL, owner/repo#N, or number)",
 )
 @click.option(
     "--repo",
@@ -861,7 +861,7 @@ def models():
 @click.option(
     "--pr",
     default=None,
-    help="GitHub PR to review (URL, owner/repo#N, or number)",
+    help="PR/MR to review (GitHub/GitLab URL, owner/repo#N, or number)",
 )
 @click.option(
     "--repo",
@@ -917,13 +917,13 @@ def models():
 @click.option(
     "--github-issue",
     default=None,
-    help="GitHub issue to check changes against (URL, owner/repo#N, or number)",
+    help="Issue to check against (GitHub/GitLab URL, owner/repo#N, or number)",
 )
 @click.option(
     "--comment",
     is_flag=True,
     default=False,
-    help="Post review as a comment on the PR (requires --pr)",
+    help="Post review as a comment on the PR/MR (requires --pr)",
 )
 @click.option(
     "--run-tests/--no-run-tests",
@@ -1022,9 +1022,9 @@ def review_loop(branch, base, pr, repo, spec, model, output, output_dir, max_ite
     if github_issue:
         try:
             issue_content = get_github_issue(github_issue)
-            click.echo(f"Fetched GitHub issue {github_issue}", err=True)
+            click.echo(f"Fetched issue {github_issue}", err=True)
         except (RuntimeError, ValueError) as e:
-            click.echo(f"Warning: Could not fetch GitHub issue: {e}", err=True)
+            click.echo(f"Warning: Could not fetch issue: {e}", err=True)
     elif issue:
         issue_content = read_file_content(issue)
         if issue_content:
