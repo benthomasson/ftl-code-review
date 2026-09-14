@@ -1,7 +1,7 @@
 ---
 name: code-review
 description: Run multi-model AI code reviews with lint checking
-argument-hint: "[review|lint|gate|compare|check-spec|models] [options]"
+argument-hint: "[review-loop|review|lint|gate|compare|check-spec|models] [options]"
 allowed-tools: Bash(code-review *), Bash(uv run code-review *), Bash(uvx *code-review*), Read
 ---
 
@@ -20,18 +20,27 @@ You are running AI-powered code reviews using the `code-review` CLI tool. This t
 Try these in order until one works:
 1. `code-review $ARGUMENTS` (if installed via uv/pip)
 2. `uv run code-review $ARGUMENTS` (if in the repo with pyproject.toml)
-3. `uvx --from git+https://github.com/benthomasson/ftl-code-review code-review $ARGUMENTS` (fallback)
+3. `uvx --from git+https://github.com/benthomasson/multi-model-code-review code-review $ARGUMENTS` (fallback)
 
 ## Common Commands
 
+**Prefer `review-loop` over `review`.** It auto-gathers function bodies, related tests, and coverage data, then lets models request more observations iteratively. `review` without `--observations` only sees diff hunks.
+
+### Review a GitHub PR
+```bash
+code-review review-loop --pr https://github.com/owner/repo/pull/123
+code-review review-loop --pr owner/repo#123
+code-review review-loop --pr 123  # uses current repo
+```
+
 ### Review a branch
 ```bash
-code-review review -b feature-branch --base main
+code-review review-loop -b feature-branch --base main
 ```
 
 ### Review with repo flag (run from anywhere)
 ```bash
-code-review review --repo ~/git/my-project -b feature-branch
+code-review review-loop --repo ~/git/my-project -b feature-branch
 ```
 
 ### Run lint checks only
@@ -42,6 +51,12 @@ code-review lint --repo ~/git/my-project -b feature-branch
 ### Fix lint issues automatically
 ```bash
 code-review lint --repo ~/git/my-project -b feature-branch --fix
+```
+
+### Review a PR against its issue
+```bash
+code-review review-loop --pr https://github.com/owner/repo/pull/123 --github-issue https://github.com/owner/repo/issues/42
+code-review review-loop --pr owner/repo#123 --github-issue owner/repo#42
 ```
 
 ### Gate check (exit code based on result)
@@ -77,10 +92,11 @@ code-review models
 
 ## Command Reference
 
-### `review`
-Run full code review with multiple models.
+### `review-loop` (recommended)
+Automated observe/review loop. Auto-gathers function bodies, related tests, and coverage data, then iterates observe→review until models need no more context (up to `--max-iterations`).
 
 Options:
+- `--pr` - GitHub PR to review (URL, owner/repo#N, or number)
 - `-b, --branch` - Branch to review (default: staged changes)
 - `--base` - Base branch to diff against (default: main)
 - `-r, --repo` - Repository directory (default: current directory)
@@ -88,8 +104,30 @@ Options:
 - `-s, --spec` - Path to spec file for compliance checking
 - `-o, --output` - Output format: full or summary
 - `-d, --output-dir` - Save reports and raw responses to directory
+- `--max-iterations` - Maximum observe/review iterations (default: 3)
+- `--beliefs` - Path to beliefs.md for belief-aware review (from code-expert)
+- `--github-issue` - GitHub issue to check against (URL, owner/repo#N, or number)
+- `--comment` - Post review as a PR comment (requires `--pr`)
+- `--run-tests` - Run pytest on related test files
+- `--use-coverage-map` - Auto-run coverage-map collect if stale
+
+### `review`
+Run code review with multiple models (no automatic observations — use `review-loop` instead for best results).
+
+Options:
+- `--pr` - GitHub PR to review (URL, owner/repo#N, or number)
+- `-b, --branch` - Branch to review (default: staged changes)
+- `--base` - Base branch to diff against (default: main)
+- `-r, --repo` - Repository directory (default: current directory)
+- `-m, --model` - Models to use (repeatable, default: claude, gemini)
+- `-s, --spec` - Path to spec file for compliance checking
+- `-o, --output` - Output format: full or summary
+- `-d, --output-dir` - Save reports and raw responses to directory (default: `reviews/<branch>/`)
+- `--observations` - JSON file with pre-computed observations (from `observe` command)
 - `--lint/--no-lint` - Run lint checks before model review
 - `--fix-lint` - Auto-fix lint issues before review
+- `--beliefs` - Path to beliefs.md for belief-aware review (from code-expert)
+- `--github-issue` - GitHub issue to check against (URL, owner/repo#N, or number)
 
 ### `lint`
 Run lint checks (black, isort, ruff) on changed files.
@@ -134,6 +172,7 @@ Overall verdict:
 ## Self-Review and Feature Requests
 
 Models provide self-assessment after each review:
+- **Confidence**: HIGH / MEDIUM / LOW
 - **Limitations**: What context was missing
 - **Feature Requests**: Suggestions for improving the tool
 
