@@ -13,6 +13,7 @@ from ftl_code_review import (
 from ftl_code_review.reviewer import (
     _run_openai,
     check_model_available,
+    format_preflight_error,
     parse_correctness,
     parse_integration,
     parse_review_response,
@@ -32,6 +33,12 @@ class TestOpenAIAvailability:
         monkeypatch.setenv("OPENAI_API_KEY", "test-key")
         assert check_model_available("openai")
         assert check_model_available("openai:gpt-5.6-luna")
+
+    def test_missing_api_key_error_is_actionable(self):
+        message = format_preflight_error(["openai"])
+        assert "Missing API configuration" in message
+        assert "OPENAI_API_KEY" in message
+        assert "Missing CLI tools" not in message
 
     def test_model_spec_is_sent_to_openai(self, monkeypatch):
         monkeypatch.setenv("OPENAI_API_KEY", "test-key")

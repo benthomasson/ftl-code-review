@@ -20,6 +20,7 @@ from .report import format_aggregate_review, format_summary
 from .reviewer import (
     observe_with_model,
     parse_observe_response,
+    format_preflight_error,
     preflight_check,
     review_with_model,
     review_with_models,
@@ -166,8 +167,8 @@ def review(branch, base, pr, repo, spec, model, output, output_dir, observations
     # Preflight check
     missing = preflight_check(models)
     if missing:
-        click.echo(f"Error: Missing CLI tools: {', '.join(missing)}", err=True)
-        click.echo("Install the missing tools or use --model to select available ones.", err=True)
+        click.echo(format_preflight_error(missing), err=True)
+        click.echo("Install missing tools or configure the required API key.", err=True)
         sys.exit(1)
 
     # Get diff
@@ -340,8 +341,9 @@ def observe(branch, base, repo, model, output, run):
         sys.exit(0)
 
     # Preflight check
-    if preflight_check([model]) != []:
-        click.echo(f"Error: Model '{model}' CLI not available", err=True)
+    missing = preflight_check([model])
+    if missing:
+        click.echo(format_preflight_error(missing), err=True)
         sys.exit(1)
 
     # Run observation gathering
@@ -508,8 +510,8 @@ def gate(branch, base, pr, repo, spec, model, output_dir, lint, fix_lint, belief
     # Preflight check
     missing = preflight_check(models)
     if missing:
-        click.echo(f"Error: Missing CLI tools: {', '.join(missing)}", err=True)
-        sys.exit(2)  # Block on missing tools
+        click.echo(format_preflight_error(missing), err=True)
+        sys.exit(2)  # Block on missing tools or API configuration
 
     # Get diff
     try:
@@ -649,7 +651,7 @@ def compare(branch, base, pr, repo, model):
     # Preflight check
     missing = preflight_check(models)
     if missing:
-        click.echo(f"Error: Missing CLI tools: {', '.join(missing)}", err=True)
+        click.echo(format_preflight_error(missing), err=True)
         sys.exit(1)
 
     # Get diff
@@ -973,7 +975,7 @@ def review_loop(branch, base, pr, repo, spec, model, output, output_dir, max_ite
     # Preflight check
     missing = preflight_check(models)
     if missing:
-        click.echo(f"Error: Missing CLI tools: {', '.join(missing)}", err=True)
+        click.echo(format_preflight_error(missing), err=True)
         sys.exit(1)
 
     # Get diff
@@ -1438,7 +1440,7 @@ def files(paths, repo, spec, model, output_dir, glob, fix_blocks, beliefs, issue
     # Preflight check
     missing = preflight_check(models)
     if missing:
-        click.echo(f"Error: Missing CLI tools: {', '.join(missing)}", err=True)
+        click.echo(format_preflight_error(missing), err=True)
         sys.exit(1)
 
     # Build pseudo-diff from file contents

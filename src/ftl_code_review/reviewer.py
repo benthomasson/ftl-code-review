@@ -67,6 +67,29 @@ def preflight_check(models: list[str]) -> list[str]:
     return missing
 
 
+def format_preflight_error(missing: list[str]) -> str:
+    """Explain whether missing models need a CLI or API configuration."""
+    cli_missing = []
+    api_missing = []
+    for model in missing:
+        provider, _ = _model_provider(model)
+        if provider in API_MODELS:
+            api_missing.append(model)
+        else:
+            cli_missing.append(model)
+
+    messages = []
+    if cli_missing:
+        messages.append(f"Error: Missing CLI tools: {', '.join(cli_missing)}")
+    if api_missing:
+        names = ", ".join(api_missing)
+        messages.append(
+            f"Error: Missing API configuration: {names}. "
+            "Set OPENAI_API_KEY in the environment."
+        )
+    return "\\n".join(messages)
+
+
 async def _run_openai(prompt: str, timeout: int, model_name: str | None = None) -> str:
     """Invoke OpenAI's chat completions API without requiring an SDK."""
     api_key = os.environ.get("OPENAI_API_KEY")
