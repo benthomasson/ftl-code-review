@@ -5,6 +5,9 @@ import json
 import os
 import re
 import shutil
+import threading
+import urllib.error
+import urllib.request
 
 from . import (
     ChangeVerdict,
@@ -18,19 +21,25 @@ from . import (
 )
 from .observations import run_observations
 
-# Model CLI commands - extend this dict to add new models
-# Note: gemini requires empty string after -p to read prompt from stdin
+# Model CLI commands. API-backed providers are handled by run_model directly.
+# Note: gemini requires empty string after -p to read prompt from stdin.
 MODEL_COMMANDS: dict[str, list[str]] = {
     "claude": ["claude", "-p"],
     "gemini": ["gemini", "-p", ""],  # empty arg is workaround for stdin input
 }
+
+API_MODELS = {"openai"}
+OPENAI_API_URL = "https://api.openai.com/v1/chat/completions"
+OPENAI_MODEL = "gpt-4o-mini"
 
 # Default timeout for model invocation (5 minutes)
 DEFAULT_TIMEOUT = 300
 
 
 def check_model_available(model: str) -> bool:
-    """Check if a model's CLI is available."""
+    """Check whether a model provider is configured and available."""
+    if model in API_MODELS:
+        return bool(os.environ.get("OPENAI_API_KEY"))
     if model not in MODEL_COMMANDS:
         return False
     cmd = MODEL_COMMANDS[model][0]
@@ -46,9 +55,76 @@ def preflight_check(models: list[str]) -> list[str]:
     return missing
 
 
+async def _run_openai(prompt: str, timeout: int) -> str:
+    """Invoke OpenAI's chat completions API without requiring an SDK."""
+    api_key = os.environ.get("OPENAI_API_KEY")
+    if not api_key:
+        raise RuntimeError("OPENAI_API_KEY is not set")
+    model_name = os.environ.get("OPENAI_MODEL", OPENAI_MODEL)
+    payload = json.dumps({
+        "model": model_name,
+        "messages": [{"role": "user", "content": prompt}],
+    }).encode()
+    request = urllib.request.Request(
+        os.environ.get("OPENAI_API_URL", OPENAI_API_URL),
+        data=payload,
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+
+    def request_api() -> str:
+        try:
+            with urllib.request.urlopen(request, timeout=timeout) as response:
+                data = json.loads(response.read())
+        except urllib.error.HTTPError as error:
+            detail = error.read().decode(errors="replace")
+            raise RuntimeError(f"OpenAI API returned HTTP {error.code}: {detail}") from error
+        except urllib.error.URLError as error:
+            raise RuntimeError(f"OpenAI API request failed: {error.reason}") from error
+        try:
+            return data["choices"][0]["message"]["content"]
+        except (KeyError, IndexError, TypeError) as error:
+            raise RuntimeError("OpenAI API response did not contain message content") from error
+
+    # Do not use asyncio.to_thread here.  Its work runs in the event loop's
+    # default executor, and asyncio.run() waits for that executor to shut down
+    # after cancellation.  A cancelled timeout would therefore still block
+    # until urlopen() returned.  A daemon thread lets the coroutine cancel
+    # immediately while the socket-level timeout bounds the abandoned request.
+    loop = asyncio.get_running_loop()
+    result: asyncio.Future[str] = loop.create_future()
+
+    def complete_request() -> None:
+        try:
+            value = request_api()
+        except BaseException as error:
+            callback = lambda: set_result(error=error)
+        else:
+            callback = lambda: set_result(value=value)
+        try:
+            loop.call_soon_threadsafe(callback)
+        except RuntimeError:
+            # The event loop may have closed after the caller cancelled us.
+            pass
+
+    def set_result(*, value: str | None = None, error: BaseException | None = None) -> None:
+        if result.done():
+            return
+        if error is not None:
+            result.set_exception(error)
+        else:
+            result.set_result(value)  # type: ignore[arg-type]
+
+    threading.Thread(target=complete_request, daemon=True).start()
+    return await asyncio.wait_for(result, timeout=timeout)
+
+
 async def run_model(model: str, prompt: str, timeout: int = DEFAULT_TIMEOUT) -> str:
     """
-    Invoke model via CLI, piping prompt through stdin.
+    Invoke a model, using an API for API-backed providers or a CLI over stdin.
 
     Args:
         model: Model name (must be in MODEL_COMMANDS)
@@ -63,8 +139,15 @@ async def run_model(model: str, prompt: str, timeout: int = DEFAULT_TIMEOUT) -> 
         TimeoutError: If model doesn't respond in time
         RuntimeError: If model invocation fails
     """
+    if model in API_MODELS:
+        try:
+            return await _run_openai(prompt, timeout)
+        except asyncio.TimeoutError:
+            raise TimeoutError(f"Model {model} timed out after {timeout}s") from None
+
     if model not in MODEL_COMMANDS:
-        raise ValueError(f"Unknown model: {model}. Available: {list(MODEL_COMMANDS.keys())}")
+        available = [*MODEL_COMMANDS.keys(), *API_MODELS]
+        raise ValueError(f"Unknown model: {model}. Available: {available}")
 
     cmd = MODEL_COMMANDS[model]
 

@@ -1,5 +1,8 @@
 """Tests for reviewer module - especially response parsing."""
 
+import asyncio
+import threading
+
 from ftl_code_review import (
     Correctness,
     Integration,
@@ -8,6 +11,8 @@ from ftl_code_review import (
     Verdict,
 )
 from ftl_code_review.reviewer import (
+    _run_openai,
+    check_model_available,
     parse_correctness,
     parse_integration,
     parse_review_response,
@@ -15,6 +20,41 @@ from ftl_code_review.reviewer import (
     parse_test_coverage,
     parse_verdict,
 )
+
+
+class TestOpenAIAvailability:
+    def test_requires_api_key(self, monkeypatch):
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        assert not check_model_available("openai")
+
+    def test_uses_api_key(self, monkeypatch):
+        monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+        assert check_model_available("openai")
+
+    def test_timeout_cancellation_does_not_wait_for_request(self, monkeypatch):
+        monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+        request_started = threading.Event()
+        release_request = threading.Event()
+
+        def blocking_request(*args, **kwargs):
+            request_started.set()
+            release_request.wait()
+            return object()
+
+        monkeypatch.setattr("urllib.request.urlopen", blocking_request)
+
+        async def run():
+            task = asyncio.create_task(_run_openai("prompt", timeout=1))
+            await asyncio.to_thread(request_started.wait, 1)
+            task.cancel()
+            try:
+                await asyncio.wait_for(task, timeout=0.1)
+            except asyncio.CancelledError:
+                pass
+            finally:
+                release_request.set()
+
+        asyncio.run(run())
 
 
 class TestParseVerdict:

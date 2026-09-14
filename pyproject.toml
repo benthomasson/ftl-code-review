@@ -8,7 +8,7 @@ requires-python = ">=3.11"
 authors = [
     { name = "Ben Thomasson", email = "bthomass@redhat.com" }
 ]
-keywords = ["ai", "code-review", "multi-model", "claude", "gemini"]
+keywords = ["ai", "code-review", "multi-model", "claude", "gemini", "openai"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Environment :: Console",

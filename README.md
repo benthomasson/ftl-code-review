@@ -24,7 +24,7 @@ code-review review-loop
 
 ## Why Multi-Model?
 
-As AI-assisted development scales, human reviewers become the bottleneck. This tool runs reviews through multiple AI models (Claude, Gemini) to:
+As AI-assisted development scales, human reviewers become the bottleneck. This tool runs reviews through multiple AI models (Claude, Gemini, and optionally OpenAI) to:
 
 - **Catch issues** before human review
 - **Surface disagreements** between models as signals for attention
@@ -59,7 +59,14 @@ Run a single-pass review without observation gathering.
 code-review review -b feature-branch
 code-review review -b feature-branch --spec spec.md
 code-review review --observations obs.json  # With pre-gathered observations
+
+# Use OpenAI (requires OPENAI_API_KEY; optionally set OPENAI_MODEL)
+OPENAI_API_KEY=... code-review review -m openai
 ```
+
+The `openai` provider uses the OpenAI Chat Completions API and defaults to
+`gpt-4o-mini`. Set `OPENAI_MODEL` to choose another compatible model. You can
+also set `OPENAI_API_URL` for a compatible API endpoint.
 
 ### observe
 
