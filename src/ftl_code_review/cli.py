@@ -12,7 +12,8 @@ from . import Verdict
 from .aggregator import aggregate_reviews
 from .beliefs import filter_beliefs
 from .git_utils import extract_changed_files, fetch_pr_locally, get_diff, get_github_issue, get_pr_diff, post_pr_comment, pr_output_dir_name, read_file_content
-from .lint import check_test_discoverability, get_changed_python_files, run_lint_checks, run_lint_fixes
+from .language import LanguageProfile, detect_language
+from .lint import check_test_discoverability, get_changed_source_files, run_lint_checks, run_lint_fixes
 from .fixer import fix_blocks as fix_blocks_async
 from .observations import coverage_map_tests, file_imports, format_test_results, gather_function_context, gather_reasons_beliefs, gather_related_test_files, run_observations, run_tests_for_files
 from .prompts import build_observe_prompt, build_review_prompt, build_spec_check_prompt
@@ -30,12 +31,12 @@ from .reviewer import (
 DEFAULT_MODELS = ["claude", "gemini"]
 
 
-async def _gather_coverage_lookups(python_files: list[str], repo_path: str, limit: int = 10) -> dict:
+async def _gather_coverage_lookups(source_files: list[str], repo_path: str, limit: int = 10) -> dict:
     """Gather coverage-map lookups for multiple files in parallel.
 
     Returns dict mapping observation names to results.
     """
-    files_to_check = python_files[:limit]
+    files_to_check = source_files[:limit]
     if not files_to_check:
         return {}
 
@@ -491,7 +492,7 @@ def gate(branch, base, pr, repo, spec, model, output_dir, lint, fix_lint, belief
 
     # Lint fix/check (pre-model gate) — skip for PR reviews
     if (fix_lint or lint) and not pr:
-        py_files = get_changed_python_files(branch, base, cwd=repo)
+        py_files = get_changed_source_files(branch, base, cwd=repo)
         if py_files:
             if fix_lint:
                 click.echo(f"Fixing lint issues on {len(py_files)} files...", err=True)
@@ -794,10 +795,11 @@ def check_spec(spec_file, branch, base, repo, model):
 )
 def lint(branch, base, repo, fix):
     """Run lint checks (black, isort, ruff) on changed files."""
-    py_files = get_changed_python_files(branch, base, cwd=repo)
+    lang = detect_language(repo or ".")
+    py_files = get_changed_source_files(branch, base, cwd=repo, lang=lang)
 
     if not py_files:
-        click.echo("No Python files changed.")
+        click.echo(f"No {lang.name} files changed.")
         sys.exit(0)
 
     click.echo(f"{'Fixing' if fix else 'Checking'} {len(py_files)} files:")
@@ -1041,9 +1043,10 @@ def review_loop(branch, base, pr, repo, spec, model, output, output_dir, max_ite
 
     # Auto-run coverage-map collect if requested and stale/missing
     changed_files = extract_changed_files(diff_content)
-    python_files = [f for f in changed_files if f.endswith(".py") and not f.startswith("tests/")]
+    lang = detect_language(repo)
+    source_files = [f for f in changed_files if lang.matches_extension(f) and not lang.is_test_file(f)]
 
-    if use_coverage_map and python_files:
+    if use_coverage_map and source_files:
         import subprocess as _sp
 
         cov_json = os.path.join(repo, "coverage-map.json")
@@ -1052,7 +1055,7 @@ def review_loop(branch, base, pr, repo, spec, model, output, output_dir, max_ite
         if not needs_collect:
             # Check staleness: if any source file is newer than coverage-map.json
             cov_mtime = os.path.getmtime(cov_json)
-            for src in python_files:
+            for src in source_files:
                 src_path = os.path.join(repo, src)
                 if os.path.exists(src_path) and os.path.getmtime(src_path) > cov_mtime:
                     needs_collect = True
@@ -1087,9 +1090,9 @@ def review_loop(branch, base, pr, repo, spec, model, output, output_dir, max_ite
             click.echo("coverage-map.json is up to date", err=True)
 
     # Auto-lookup coverage-map for changed files (parallel)
-    if python_files:
-        click.echo(f"Auto-lookup: {len(python_files)} Python file(s) changed", err=True)
-        coverage_obs = asyncio.run(_gather_coverage_lookups(python_files, repo))
+    if source_files:
+        click.echo(f"Auto-lookup: {len(source_files)} {lang.name} file(s) changed", err=True)
+        coverage_obs = asyncio.run(_gather_coverage_lookups(source_files, repo))
         for obs_name, result in coverage_obs.items():
             all_observations[obs_name] = result
             click.echo(f"  {result.get('source_file', obs_name)}: {result.get('test_count', 0)} tests", err=True)
@@ -1148,7 +1151,8 @@ def review_loop(branch, base, pr, repo, spec, model, output, output_dir, max_ite
     # Auto-extract file references from beliefs content
     if beliefs_content and repo != ".":
         import re as _re
-        belief_file_refs = _re.findall(r'[\w/]+\.py', beliefs_content)
+        ext_pattern = "|".join(_re.escape(ext) for ext in lang.source_extensions)
+        belief_file_refs = _re.findall(r'[\w/]+(?:' + ext_pattern + r')', beliefs_content)
         belief_file_refs = sorted(set(belief_file_refs))
         if belief_file_refs:
             click.echo(f"Auto-extracting imports from {len(belief_file_refs)} belief-referenced file(s)...", err=True)
@@ -1181,9 +1185,9 @@ def review_loop(branch, base, pr, repo, spec, model, output, output_dir, max_ite
             click.echo("No relevant beliefs found in reasons.db.", err=True)
 
     # Run tests if requested
-    if run_tests and python_files:
-        click.echo("Running pytest on related test files...", err=True)
-        test_results = asyncio.run(run_tests_for_files(python_files, repo))
+    if run_tests and source_files:
+        click.echo("Running tests on related test files...", err=True)
+        test_results = asyncio.run(run_tests_for_files(source_files, repo))
         status = test_results["status"]
         if status != "SKIPPED":
             passed = test_results["passed"]
@@ -1406,9 +1410,10 @@ def files(paths, repo, spec, model, output_dir, glob, fix_blocks, beliefs, issue
         else:
             full_path = repo_path / path_arg if not Path(path_arg).is_absolute() else Path(path_arg)
             if full_path.is_dir():
-                # Add all Python files in directory
-                for py_file in full_path.rglob("*.py"):
-                    files_to_review.append(py_file)
+                lang = detect_language(str(repo_path))
+                for glob in lang.source_globs:
+                    for src_file in full_path.rglob(glob):
+                        files_to_review.append(src_file)
             elif full_path.exists():
                 files_to_review.append(full_path)
             else:
@@ -1418,8 +1423,8 @@ def files(paths, repo, spec, model, output_dir, glob, fix_blocks, beliefs, issue
         click.echo("No files found to review.", err=True)
         sys.exit(1)
 
-    # Filter to Python files only
-    files_to_review = [f for f in files_to_review if f.suffix == ".py"]
+    lang = detect_language(str(repo_path))
+    files_to_review = [f for f in files_to_review if lang.matches_extension(str(f))]
     files_to_review = sorted(set(files_to_review))
 
     click.echo(f"Reviewing {len(files_to_review)} file(s):", err=True)
@@ -1494,10 +1499,10 @@ def files(paths, repo, spec, model, output_dir, glob, fix_blocks, beliefs, issue
     all_observations = {}
 
     # Auto-lookup coverage-map for files (parallel)
-    python_files = [str(f.relative_to(repo_path)) for f in files_to_review if not str(f).startswith("tests")]
-    if python_files:
-        click.echo(f"Auto-lookup: checking coverage for {len(python_files)} file(s)", err=True)
-        all_observations = asyncio.run(_gather_coverage_lookups(python_files, str(repo_path)))
+    source_files = [str(f.relative_to(repo_path)) for f in files_to_review if not str(f).startswith("tests")]
+    if source_files:
+        click.echo(f"Auto-lookup: checking coverage for {len(source_files)} file(s)", err=True)
+        all_observations = asyncio.run(_gather_coverage_lookups(source_files, str(repo_path)))
         for obs_name, result in all_observations.items():
             click.echo(f"  {result.get('source_file', obs_name)}: {result.get('test_count', 0)} tests", err=True)
         if all_observations:

@@ -26,14 +26,17 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from .language import LanguageProfile, PYTHON, detect_language
 
-def is_test_file(file_path: str) -> bool:
+
+def is_test_file(file_path: str, lang: LanguageProfile | None = None) -> bool:
     """Classify whether a file path belongs to test code.
 
     Checks filename patterns and path components commonly used for tests.
 
     Args:
         file_path: Relative or absolute file path.
+        lang: Language profile for language-specific patterns.
 
     Returns:
         True if the file is a test file, False otherwise.
@@ -48,19 +51,25 @@ def is_test_file(file_path: str) -> bool:
         >>> is_test_file("conftest.py")
         True
     """
+    if lang:
+        return lang.is_test_file(file_path)
+
     from pathlib import PurePosixPath
 
     path = PurePosixPath(file_path)
     basename = path.name
 
-    # Filename patterns
     if basename.startswith("test_") or basename.endswith("_test.py"):
         return True
     if basename == "conftest.py":
         return True
+    # JS/TS patterns
+    for suffix in (".test.js", ".spec.js", ".test.ts", ".spec.ts",
+                    ".test.jsx", ".spec.jsx", ".test.tsx", ".spec.tsx"):
+        if basename.endswith(suffix):
+            return True
 
-    # Path component patterns
-    test_dirs = {"tests", "test", "testing"}
+    test_dirs = {"tests", "test", "testing", "__tests__", "__test__"}
     for part in path.parts:
         if part in test_dirs:
             return True
@@ -214,7 +223,7 @@ class _RaisesVisitor(ast.NodeVisitor):
 
 async def raises_analysis(file_path: str, function_name: str, repo_path: str | None = None) -> dict[str, Any]:
     """
-    Static analysis of what exceptions a function might raise.
+    Static analysis of what exceptions a function might raise (Python only).
 
     Ignores exceptions that are caught by local try/except blocks.
 
@@ -226,6 +235,8 @@ async def raises_analysis(file_path: str, function_name: str, repo_path: str | N
     Returns:
         Dict with explicit raises and called functions that might raise
     """
+    if not file_path.endswith(".py"):
+        return {"error": "raises_analysis requires a Python file", "function": function_name, "file": str(file_path)}
     try:
         if repo_path and not Path(file_path).is_absolute():
             full_path = Path(repo_path) / file_path
@@ -268,7 +279,7 @@ async def raises_analysis(file_path: str, function_name: str, repo_path: str | N
 
 async def call_graph(file_path: str, function_name: str, repo_path: str | None = None) -> dict[str, Any]:
     """
-    Build call graph for a function.
+    Build call graph for a function (Python only).
 
     Args:
         file_path: Path to the Python file
@@ -278,6 +289,8 @@ async def call_graph(file_path: str, function_name: str, repo_path: str | None =
     Returns:
         Dict with functions called by this function
     """
+    if not file_path.endswith(".py"):
+        return {"error": "call_graph requires a Python file", "function": function_name, "file": str(file_path)}
     try:
         if repo_path and not Path(file_path).is_absolute():
             full_path = Path(repo_path) / file_path
@@ -332,20 +345,23 @@ async def call_graph(file_path: str, function_name: str, repo_path: str | None =
         return {"error": str(e), "function": function_name}
 
 
-async def find_usages(symbol: str, repo_path: str) -> dict[str, Any]:
+async def find_usages(symbol: str, repo_path: str, lang: LanguageProfile | None = None) -> dict[str, Any]:
     """
     Find usages of a symbol in the codebase.
 
     Args:
         symbol: Symbol to search for (class name, function name, etc.)
         repo_path: Repository path to search in
+        lang: Language profile for file filtering
 
     Returns:
         Dict with files and line numbers where the symbol is used
     """
     try:
+        lang = lang or detect_language(repo_path)
+        grep_cmd = ["grep", "-Frn"] + lang.grep_include_args() + [symbol, repo_path]
         proc = await asyncio.create_subprocess_exec(
-            "grep", "-Frn", "--include=*.py", symbol, repo_path,
+            *grep_cmd,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
@@ -438,7 +454,8 @@ def _extract_enclosing_function(
 
 
 async def find_callers(
-    symbol: str, repo_path: str, include_context: bool = True
+    symbol: str, repo_path: str, include_context: bool = True,
+    lang: LanguageProfile | None = None,
 ) -> dict[str, Any]:
     """Find callers of a symbol with production/test separation and calling context.
 
@@ -450,6 +467,7 @@ async def find_callers(
         repo_path: Repository path to search in.
         include_context: Whether to extract enclosing function context for each
             call site. Defaults to True.
+        lang: Language profile for file filtering.
 
     Returns:
         Dict with ``production_callers`` and ``test_callers`` lists, each entry
@@ -464,8 +482,10 @@ async def find_callers(
         ...     print(caller["context_function"], caller["file"], caller["line"])
     """
     try:
+        lang = lang or detect_language(repo_path)
+        grep_cmd = ["grep", "-Frn"] + lang.grep_include_args() + [symbol, repo_path]
         proc = await asyncio.create_subprocess_exec(
-            "grep", "-Frn", "--include=*.py", symbol, repo_path,
+            *grep_cmd,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
@@ -592,7 +612,9 @@ async def git_blame(file_path: str, start_line: int, end_line: int, repo_path: s
         return {"error": str(e), "file": file_path}
 
 
-async def test_coverage(file_path: str, repo_path: str) -> dict[str, Any]:
+async def test_coverage(
+    file_path: str, repo_path: str, lang: LanguageProfile | None = None,
+) -> dict[str, Any]:
     """
     Find tests that cover a given file.
 
@@ -602,31 +624,27 @@ async def test_coverage(file_path: str, repo_path: str) -> dict[str, Any]:
     Args:
         file_path: Path to the source file
         repo_path: Repository path
+        lang: Language profile for test patterns
 
     Returns:
         Dict with test files/functions that cover this module
     """
     try:
-        # Try coverage-map.json first for precise data
+        lang = lang or detect_language(repo_path)
+
         coverage_map_result = await coverage_map_tests(file_path, repo_path)
         if "error" not in coverage_map_result and coverage_map_result.get("tests"):
             return coverage_map_result
 
-        # Fall back to naming conventions
         path = Path(file_path)
-        module_name = path.stem  # e.g., "client" from "client.py"
+        module_name = path.stem
 
-        # Search for test files
-        test_patterns = [
-            f"test_{module_name}.py",
-            f"{module_name}_test.py",
-            f"test_{module_name}*.py",
-        ]
+        test_patterns = lang.test_file_search_patterns(module_name)
 
         tests_found = []
         for pattern in test_patterns:
             proc = await asyncio.create_subprocess_exec(
-                "find", repo_path, "-name", pattern, "-path", "*/tests/*",
+                "find", repo_path, "-name", pattern,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
@@ -741,6 +759,153 @@ async def coverage_map_files(test_pattern: str, repo_path: str) -> dict[str, Any
         return {"error": str(e), "pattern": test_pattern}
 
 
+def _function_body_ast(
+    source: str,
+    source_lines: list[str],
+    file_path: str,
+    line_hint: int | None,
+    function_name: str | None,
+) -> dict[str, Any]:
+    """AST-based function extraction for Python files."""
+    tree = ast.parse(source)
+
+    functions: list[tuple[ast.FunctionDef | ast.AsyncFunctionDef, str | None]] = []
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ClassDef):
+            for child in ast.iter_child_nodes(node):
+                if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    functions.append((child, node.name))
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            if not any(fn is node for fn, _ in functions):
+                functions.append((node, None))
+
+    target: ast.FunctionDef | ast.AsyncFunctionDef | None = None
+    class_name: str | None = None
+
+    if line_hint is not None:
+        best: ast.FunctionDef | ast.AsyncFunctionDef | None = None
+        best_class: str | None = None
+        for fn, cls in functions:
+            if fn.lineno <= line_hint <= (fn.end_lineno or fn.lineno):
+                if best is None or fn.lineno >= best.lineno:
+                    best = fn
+                    best_class = cls
+        target = best
+        class_name = best_class
+    else:
+        for fn, cls in functions:
+            if fn.name == function_name:
+                target = fn
+                class_name = cls
+                break
+
+    if target is None:
+        search = f"line {line_hint}" if line_hint else f"'{function_name}'"
+        return {"error": f"No function found at {search}", "file": str(file_path)}
+
+    start = target.lineno
+    if target.decorator_list:
+        start = target.decorator_list[0].lineno
+    end = target.end_lineno or start
+    max_lines = 200
+    body_lines = source_lines[start - 1 : end]
+    truncated = len(body_lines) > max_lines
+    if truncated:
+        body_lines = body_lines[:max_lines]
+
+    result: dict[str, Any] = {
+        "function": target.name,
+        "file": str(file_path),
+        "start_line": start,
+        "end_line": end,
+        "source": "\n".join(body_lines),
+    }
+    if class_name:
+        result["class_name"] = class_name
+    if truncated:
+        result["truncated"] = True
+        result["total_lines"] = end - start + 1
+    return result
+
+
+import re as _re
+
+_FUNCTION_DEF_RE = _re.compile(
+    r"^\s*(?:export\s+)?(?:default\s+)?(?:async\s+)?"
+    r"(?:pub(?:\s*\(crate\))?\s+)?(?:static\s+)?"
+    r"(?:function\s+|fn\s+|func\s+|def\s+|(?:const|let|var)\s+)"
+    r"(\w+)",
+)
+_CLASS_DEF_RE = _re.compile(
+    r"^\s*(?:export\s+)?(?:class|struct|enum|interface|type|trait|impl)\s+(\w+)",
+)
+
+
+def _function_body_brace(
+    source_lines: list[str],
+    file_path: str,
+    line_hint: int | None,
+    function_name: str | None,
+) -> dict[str, Any]:
+    """Brace-counting function extraction for non-Python languages."""
+    start_idx = None
+
+    if line_hint is not None:
+        idx = line_hint - 1
+        for i in range(idx, -1, -1):
+            if _FUNCTION_DEF_RE.match(source_lines[i]) or _CLASS_DEF_RE.match(source_lines[i]):
+                start_idx = i
+                break
+    elif function_name:
+        pat = _re.compile(r"\b" + _re.escape(function_name) + r"\b")
+        for i, line in enumerate(source_lines):
+            if pat.search(line) and (_FUNCTION_DEF_RE.match(line) or _CLASS_DEF_RE.match(line)):
+                start_idx = i
+                break
+
+    if start_idx is None:
+        search = f"line {line_hint}" if line_hint else f"'{function_name}'"
+        return {"error": f"No function found at {search}", "file": str(file_path)}
+
+    m = _FUNCTION_DEF_RE.match(source_lines[start_idx]) or _CLASS_DEF_RE.match(source_lines[start_idx])
+    found_name = m.group(1) if m else function_name or "unknown"
+
+    brace_depth = 0
+    found_open = False
+    end_idx = start_idx
+
+    for i in range(start_idx, len(source_lines)):
+        line = source_lines[i]
+        for ch in line:
+            if ch == "{":
+                brace_depth += 1
+                found_open = True
+            elif ch == "}":
+                brace_depth -= 1
+        end_idx = i
+        if found_open and brace_depth <= 0:
+            break
+
+    max_lines = 200
+    body_lines = source_lines[start_idx : end_idx + 1]
+    truncated = len(body_lines) > max_lines
+    if truncated:
+        body_lines = body_lines[:max_lines]
+
+    result: dict[str, Any] = {
+        "function": found_name,
+        "file": str(file_path),
+        "start_line": start_idx + 1,
+        "end_line": end_idx + 1,
+        "source": "\n".join(body_lines),
+    }
+    if truncated:
+        result["truncated"] = True
+        result["total_lines"] = end_idx - start_idx + 1
+    return result
+
+
 async def function_body(
     file_path: str,
     line_hint: int | None = None,
@@ -748,13 +913,13 @@ async def function_body(
     repo_path: str | None = None,
 ) -> dict[str, Any]:
     """
-    Extract the full source of a function or method from a Python file.
+    Extract the full source of a function or method from a source file.
 
-    Finds the function either by name or by a line number that falls within it.
-    For methods, includes the enclosing class name for context.
+    For Python files, uses AST for precise extraction. For other languages,
+    uses regex + brace/indent counting as a best-effort fallback.
 
     Args:
-        file_path: Path to the Python file (relative to repo_path or absolute).
+        file_path: Path to the source file (relative to repo_path or absolute).
         line_hint: A line number inside the target function. The innermost
             function/method containing this line is returned.
         function_name: Name of the function to find (searched depth-first).
@@ -783,76 +948,12 @@ async def function_body(
             full_path = Path(file_path)
 
         source = full_path.read_text()
-        tree = ast.parse(source)
         source_lines = source.splitlines()
 
-        # Collect all function/method nodes with their class context
-        functions: list[tuple[ast.FunctionDef | ast.AsyncFunctionDef, str | None]] = []
-
-        for node in ast.walk(tree):
-            if isinstance(node, ast.ClassDef):
-                for child in ast.iter_child_nodes(node):
-                    if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                        functions.append((child, node.name))
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                # Top-level functions (avoid double-adding methods)
-                if not any(fn is node for fn, _ in functions):
-                    functions.append((node, None))
-
-        target: ast.FunctionDef | ast.AsyncFunctionDef | None = None
-        class_name: str | None = None
-
-        if line_hint is not None:
-            # Find the innermost function containing this line
-            best: ast.FunctionDef | ast.AsyncFunctionDef | None = None
-            best_class: str | None = None
-            for fn, cls in functions:
-                if fn.lineno <= line_hint <= (fn.end_lineno or fn.lineno):
-                    if best is None or fn.lineno >= best.lineno:
-                        best = fn
-                        best_class = cls
-            target = best
-            class_name = best_class
+        if file_path.endswith(".py"):
+            return _function_body_ast(source, source_lines, file_path, line_hint, function_name)
         else:
-            # Find by name (first match, depth-first)
-            for fn, cls in functions:
-                if fn.name == function_name:
-                    target = fn
-                    class_name = cls
-                    break
-
-        if target is None:
-            search = f"line {line_hint}" if line_hint else f"'{function_name}'"
-            return {
-                "error": f"No function found at {search}",
-                "file": str(file_path),
-            }
-
-        start = target.lineno
-        # Include decorators (e.g. @property, @retry) — they affect behavior
-        if target.decorator_list:
-            start = target.decorator_list[0].lineno
-        end = target.end_lineno or start
-        # Cap very large functions to avoid blowing up context
-        max_lines = 200
-        body_lines = source_lines[start - 1 : end]
-        truncated = len(body_lines) > max_lines
-        if truncated:
-            body_lines = body_lines[:max_lines]
-
-        result: dict[str, Any] = {
-            "function": target.name,
-            "file": str(file_path),
-            "start_line": start,
-            "end_line": end,
-            "source": "\n".join(body_lines),
-        }
-        if class_name:
-            result["class_name"] = class_name
-        if truncated:
-            result["truncated"] = True
-            result["total_lines"] = end - start + 1
-        return result
+            return _function_body_brace(source_lines, file_path, line_hint, function_name)
 
     except FileNotFoundError:
         result: dict[str, Any] = {
@@ -874,30 +975,33 @@ async def function_body(
 async def gather_function_context(
     diff_content: str,
     repo_path: str,
+    lang: LanguageProfile | None = None,
 ) -> dict[str, Any]:
     """
-    Automatically find all modified Python functions and return their full bodies.
+    Automatically find all modified functions and return their full bodies.
 
-    Combines diff parsing (to find touched line ranges) with AST-based function
+    Combines diff parsing (to find touched line ranges) with function
     extraction.  This is the main entry point for the "show full function bodies"
     feature — it requires no reviewer action.
 
     Args:
         diff_content: Unified diff output.
         repo_path: Repository root so relative paths can be resolved.
+        lang: Language profile for file filtering.
 
     Returns:
-        Dict mapping descriptive keys (``"file.py:function_name"``) to
+        Dict mapping descriptive keys (``"file:function_name"``) to
         ``function_body()`` results.
     """
     from .git_utils import extract_modified_line_ranges
 
+    lang = lang or detect_language(repo_path)
     ranges = extract_modified_line_ranges(diff_content)
     results: dict[str, Any] = {}
     tasks: list[tuple[str, asyncio.Task]] = []
 
     for file_path, line_ranges in ranges.items():
-        if not file_path.endswith(".py"):
+        if not lang.matches_extension(file_path):
             continue
 
         full_path = Path(repo_path) / file_path
@@ -946,15 +1050,19 @@ async def gather_function_context(
     return results
 
 
-def _extract_modified_symbols(diff_content: str, repo_path: str) -> dict[str, set[str]]:
+def _extract_modified_symbols(
+    diff_content: str, repo_path: str, lang: LanguageProfile | None = None,
+) -> dict[str, set[str]]:
     """Extract function/class names modified in each file from a diff.
 
-    Parses the diff to find modified line ranges, then uses AST to identify
-    which functions or classes those lines belong to.
+    Parses the diff to find modified line ranges, then uses AST (Python) or
+    regex (other languages) to identify which functions or classes those lines
+    belong to.
 
     Args:
         diff_content: Unified diff output.
         repo_path: Repository root for resolving file paths.
+        lang: Language profile for file filtering.
 
     Returns:
         Dict mapping file paths to sets of modified symbol names
@@ -962,11 +1070,12 @@ def _extract_modified_symbols(diff_content: str, repo_path: str) -> dict[str, se
     """
     from .git_utils import extract_modified_line_ranges
 
+    lang = lang or detect_language(repo_path)
     ranges = extract_modified_line_ranges(diff_content)
     result: dict[str, set[str]] = {}
 
     for file_path, line_ranges in ranges.items():
-        if not file_path.endswith(".py"):
+        if not lang.matches_extension(file_path):
             continue
         full_path = Path(repo_path) / file_path
         if not full_path.exists():
@@ -974,19 +1083,34 @@ def _extract_modified_symbols(diff_content: str, repo_path: str) -> dict[str, se
 
         try:
             source = full_path.read_text()
-            tree = ast.parse(source)
         except Exception:
             continue
 
-        symbols: set[str] = set()
-        for node in ast.walk(tree):
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-                node_start = node.lineno
-                node_end = node.end_lineno or node_start
-                for start, end in line_ranges:
-                    if node_start <= end and node_end >= start:
-                        symbols.add(node.name)
-                        break
+        if file_path.endswith(".py"):
+            try:
+                tree = ast.parse(source)
+            except Exception:
+                continue
+            symbols: set[str] = set()
+            for node in ast.walk(tree):
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                    node_start = node.lineno
+                    node_end = node.end_lineno or node_start
+                    for start, end in line_ranges:
+                        if node_start <= end and node_end >= start:
+                            symbols.add(node.name)
+                            break
+        else:
+            symbols = set()
+            source_lines = source.splitlines()
+            for i, line in enumerate(source_lines):
+                lineno = i + 1
+                in_range = any(start <= lineno <= end for start, end in line_ranges)
+                if not in_range:
+                    continue
+                m = _FUNCTION_DEF_RE.match(line) or _CLASS_DEF_RE.match(line)
+                if m:
+                    symbols.add(m.group(1))
 
         if symbols:
             result[file_path] = symbols
@@ -994,24 +1118,26 @@ def _extract_modified_symbols(diff_content: str, repo_path: str) -> dict[str, se
     return result
 
 
-async def _find_test_files_by_naming(module_name: str, repo_path: str) -> list[str]:
+async def _find_test_files_by_naming(
+    module_name: str, repo_path: str, lang: LanguageProfile | None = None,
+) -> list[str]:
     """Find test files by naming convention.
 
-    Searches common test directory patterns for files matching
-    ``test_{module}.py`` or ``{module}_test.py``.
+    Searches common test directory patterns for files matching language-specific
+    test naming patterns (e.g. ``test_{module}.py``, ``{module}.test.ts``).
 
     Args:
         module_name: Module stem (e.g. "proxy" from "proxy.py").
         repo_path: Repository root path.
+        lang: Language profile for test patterns.
 
     Returns:
         List of relative file paths to discovered test files.
     """
-    test_patterns = [
-        f"test_{module_name}.py",
-        f"{module_name}_test.py",
-    ]
-    search_dirs = ["tests", "test", "tests/unit", "tests/integration", "."]
+    lang = lang or detect_language(repo_path)
+    test_patterns = lang.test_file_search_patterns(module_name)
+    search_dirs = ["tests", "test", "tests/unit", "tests/integration",
+                    "__tests__", "src/__tests__", "spec", "."]
 
     found: list[str] = []
     repo = Path(repo_path)
@@ -1030,44 +1156,50 @@ async def _find_test_files_by_naming(module_name: str, repo_path: str) -> list[s
 
 
 async def _find_test_files_by_imports(
-    module_name: str, source_file: str, repo_path: str
+    module_name: str, source_file: str, repo_path: str,
+    lang: LanguageProfile | None = None,
 ) -> list[str]:
     """Find test files that import from a given module.
 
-    Searches for ``from {module} import`` or ``import {module}`` patterns
-    in Python test files across the repository.
+    Searches for import patterns in source files across the repository.
+    Supports Python dotted imports and JS/TS path-based imports.
 
     Args:
         module_name: Module stem to search for in import statements.
-        source_file: Dotted module path (e.g. "src.auth.client").
+        source_file: Source file path (e.g. "src/auth/client.py").
         repo_path: Repository root path.
+        lang: Language profile for file filtering.
 
     Returns:
         List of relative file paths that import from the module.
     """
-    # Build patterns to search for
-    patterns = [
-        f"from {module_name} import",
-        f"import {module_name}",
-    ]
-    # Also try dotted module path from source file
-    dotted = source_file.replace("/", ".").replace(".py", "")
-    if dotted != module_name:
-        patterns.append(f"from {dotted} import")
-        patterns.append(f"import {dotted}")
+    lang = lang or detect_language(repo_path)
+    patterns = [module_name]
 
-    # Also try partial dotted paths (e.g. "auth.client" from "src/auth/client.py")
-    parts = dotted.split(".")
-    if len(parts) > 1:
-        for i in range(len(parts) - 1):
-            partial = ".".join(parts[i:])
-            patterns.append(f"from {partial} import")
+    if lang.name == "python":
+        patterns = [
+            f"from {module_name} import",
+            f"import {module_name}",
+        ]
+        dotted = source_file.replace("/", ".").replace(".py", "")
+        if dotted != module_name:
+            patterns.append(f"from {dotted} import")
+            patterns.append(f"import {dotted}")
+        parts = dotted.split(".")
+        if len(parts) > 1:
+            for i in range(len(parts) - 1):
+                partial = ".".join(parts[i:])
+                patterns.append(f"from {partial} import")
+    elif lang.name in ("javascript", "typescript"):
+        stem = Path(source_file).stem
+        parent = str(Path(source_file).parent)
+        patterns = [module_name, f"/{stem}", f"'{parent}/"]
 
-    # Search test files using grep
     grep_pattern = "|".join(patterns)
     try:
+        grep_cmd = ["grep", "-rl"] + lang.grep_include_args() + ["-E", grep_pattern, repo_path]
         proc = await asyncio.create_subprocess_exec(
-            "grep", "-rl", "--include=*.py", "-E", grep_pattern, repo_path,
+            *grep_cmd,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
@@ -1083,9 +1215,7 @@ async def _find_test_files_by_imports(
                 continue
             rel = line.replace(repo_path + "/", "").replace(repo_path, "")
             rel = rel.lstrip("/")
-            # Only include test files
-            basename = Path(rel).name
-            if basename.startswith("test_") or basename.endswith("_test.py"):
+            if is_test_file(rel, lang):
                 if rel not in found:
                     found.append(rel)
         return found
@@ -1098,15 +1228,15 @@ async def gather_related_test_files(
     repo_path: str,
     max_lines_per_file: int = 500,
     max_total_lines: int = 2000,
+    lang: LanguageProfile | None = None,
 ) -> dict[str, Any]:
     """Auto-discover test files related to modified code and return their content.
 
     Given a diff, finds test files that cover modified source files using three
     strategies:
-    1. **Naming convention**: ``test_{module}.py`` / ``{module}_test.py`` in
-       common locations (``tests/``, ``test/``, same directory).
+    1. **Naming convention**: language-specific test file patterns in common locations.
     2. **Coverage map**: Precise test mapping from ``coverage-map.json`` if available.
-    3. **Import scanning**: Grep for ``from {module} import`` across test files.
+    3. **Import scanning**: Grep for import patterns across test files.
 
     Reads full test file content (capped) and filters to tests that reference
     actually-modified symbols. Also flags duplicate coverage when multiple test
@@ -1117,6 +1247,7 @@ async def gather_related_test_files(
         repo_path: Repository root path.
         max_lines_per_file: Maximum lines to include per test file (default 500).
         max_total_lines: Maximum total lines across all test files (default 2000).
+        lang: Language profile for file filtering and test discovery.
 
     Returns:
         Dict with ``test_files`` (list of file info dicts), ``modified_symbols``
@@ -1131,19 +1262,18 @@ async def gather_related_test_files(
     """
     from .git_utils import extract_changed_files
 
+    lang = lang or detect_language(repo_path)
     changed_files = extract_changed_files(diff_content)
     source_files = [
         f for f in changed_files
-        if f.endswith(".py")
-        and not Path(f).name.startswith("test_")
-        and not f.endswith("_test.py")
+        if lang.matches_extension(f)
+        and not is_test_file(f, lang)
     ]
 
     if not source_files:
-        return {"test_files": [], "modified_symbols": {}, "message": "No non-test Python files modified"}
+        return {"test_files": [], "modified_symbols": {}, "message": f"No non-test {lang.name} files modified"}
 
-    # Extract modified symbols from the diff
-    modified_symbols = _extract_modified_symbols(diff_content, repo_path)
+    modified_symbols = _extract_modified_symbols(diff_content, repo_path, lang)
 
     # Discover test files for each source file (parallel)
     all_test_files: dict[str, list[str]] = {}  # test_path -> list of source files it covers
@@ -1158,7 +1288,7 @@ async def gather_related_test_files(
         tests: set[str] = set()
 
         # Strategy 1: Naming convention
-        naming_results = await _find_test_files_by_naming(module_name, repo_path)
+        naming_results = await _find_test_files_by_naming(module_name, repo_path, lang)
         tests.update(naming_results)
 
         # Strategy 2: Coverage map
@@ -1166,17 +1296,16 @@ async def gather_related_test_files(
             cov_result = await coverage_map_tests(source_file, repo_path)
             if "error" not in cov_result and cov_result.get("tests"):
                 for test_entry in cov_result["tests"]:
-                    # coverage_map_tests returns test names, extract file paths
                     if isinstance(test_entry, str) and "::" in test_entry:
                         test_file = test_entry.split("::")[0]
                         tests.add(test_file)
-                    elif isinstance(test_entry, str) and test_entry.endswith(".py"):
+                    elif isinstance(test_entry, str) and lang.matches_extension(test_entry):
                         tests.add(test_entry)
         except Exception:
             pass
 
         # Strategy 3: Import scanning
-        import_results = await _find_test_files_by_imports(module_name, source_file, repo_path)
+        import_results = await _find_test_files_by_imports(module_name, source_file, repo_path, lang)
         tests.update(import_results)
 
         # Record mappings
@@ -1255,16 +1384,19 @@ async def run_tests_for_files(
     changed_files: list[str],
     repo_path: str,
     timeout: int = 120,
+    lang: LanguageProfile | None = None,
 ) -> dict[str, Any]:
-    """Run pytest on tests related to changed source files.
+    """Run tests related to changed source files.
 
     Discovers relevant tests via coverage-map (preferred) or naming conventions,
-    then runs them and returns structured pass/fail results.
+    then runs them and returns structured pass/fail results. Supports pytest
+    (Python) and common JS/TS test runners (npm test).
 
     Args:
-        changed_files: List of changed Python source file paths (relative to repo).
+        changed_files: List of changed source file paths (relative to repo).
         repo_path: Repository root path.
-        timeout: Maximum seconds to allow pytest to run (default 120).
+        timeout: Maximum seconds to allow the test runner (default 120).
+        lang: Language profile for file filtering and test discovery.
 
     Returns:
         Dict with pass/fail counts, status, output, test list, and duration.
@@ -1278,30 +1410,28 @@ async def run_tests_for_files(
     import subprocess
     import time
 
-    # Filter to non-test Python files
+    lang = lang or detect_language(repo_path)
+
     source_files = [
         f for f in changed_files
-        if f.endswith(".py")
-        and not Path(f).name.startswith("test_")
-        and not f.endswith("_test.py")
+        if lang.matches_extension(f)
+        and not is_test_file(f, lang)
     ]
 
     if not source_files:
         return {
             "passed": 0, "failed": 0, "errors": 0, "total": 0,
             "status": "SKIPPED",
-            "output": "No non-test Python source files to test",
+            "output": f"No non-test {lang.name} source files to test",
             "tests_run": [],
             "duration_seconds": 0.0,
         }
 
-    # Collect relevant test files from all sources
     all_tests: set[str] = set()
 
     for source_file in source_files:
         module_name = Path(source_file).stem
 
-        # Strategy 1: Coverage map (most accurate)
         try:
             cov_result = await coverage_map_tests(source_file, repo_path)
             if "error" not in cov_result and cov_result.get("tests"):
@@ -1309,14 +1439,13 @@ async def run_tests_for_files(
                     if isinstance(test_entry, str) and "::" in test_entry:
                         test_file = test_entry.split("::")[0]
                         all_tests.add(test_file)
-                    elif isinstance(test_entry, str) and test_entry.endswith(".py"):
+                    elif isinstance(test_entry, str) and lang.matches_extension(test_entry):
                         all_tests.add(test_entry)
         except Exception:
             pass
 
-        # Strategy 2: Naming convention fallback
         try:
-            naming_results = await _find_test_files_by_naming(module_name, repo_path)
+            naming_results = await _find_test_files_by_naming(module_name, repo_path, lang)
             all_tests.update(naming_results)
         except Exception:
             pass
@@ -1344,12 +1473,24 @@ async def run_tests_for_files(
             "duration_seconds": 0.0,
         }
 
-    # Run pytest
-    cmd = [
-        sys.executable, "-m", "pytest",
-        *test_files,
-        "--tb=short", "--no-header", "-q",
-    ]
+    if lang.name == "python":
+        cmd = [
+            sys.executable, "-m", "pytest",
+            *test_files,
+            "--tb=short", "--no-header", "-q",
+        ]
+    elif lang.name in ("javascript", "typescript"):
+        cmd = ["npx", "jest", "--no-coverage", "--", *test_files]
+        if not (Path(repo_path) / "node_modules" / ".bin" / "jest").exists():
+            cmd = ["npm", "test", "--", "--no-coverage"]
+    else:
+        return {
+            "passed": 0, "failed": 0, "errors": 0, "total": 0,
+            "status": "SKIPPED",
+            "output": f"No test runner configured for {lang.name}",
+            "tests_run": test_files,
+            "duration_seconds": 0.0,
+        }
 
     start = time.monotonic()
     try:
@@ -1459,7 +1600,9 @@ def format_test_results(results: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-async def related_test_files(file_path: str, repo_path: str) -> dict[str, Any]:
+async def related_test_files(
+    file_path: str, repo_path: str, lang: LanguageProfile | None = None,
+) -> dict[str, Any]:
     """Find test files related to a specific source file.
 
     Observation tool wrapper — discovers test files by naming convention and
@@ -1468,24 +1611,25 @@ async def related_test_files(file_path: str, repo_path: str) -> dict[str, Any]:
     Args:
         file_path: Source file path (relative to repo_path).
         repo_path: Repository root path.
+        lang: Language profile for file filtering.
 
     Returns:
         Dict with discovered test file paths and reference info.
     """
+    lang = lang or detect_language(repo_path)
     module_name = Path(file_path).stem
 
     tests: set[str] = set()
-    tests.update(await _find_test_files_by_naming(module_name, repo_path))
-    tests.update(await _find_test_files_by_imports(module_name, file_path, repo_path))
+    tests.update(await _find_test_files_by_naming(module_name, repo_path, lang))
+    tests.update(await _find_test_files_by_imports(module_name, file_path, repo_path, lang))
 
-    # Also check coverage map
     try:
         cov_result = await coverage_map_tests(file_path, repo_path)
         if "error" not in cov_result and cov_result.get("tests"):
             for test_entry in cov_result["tests"]:
                 if isinstance(test_entry, str) and "::" in test_entry:
                     tests.add(test_entry.split("::")[0])
-                elif isinstance(test_entry, str) and test_entry.endswith(".py"):
+                elif isinstance(test_entry, str) and lang.matches_extension(test_entry):
                     tests.add(test_entry)
     except Exception:
         pass
@@ -1508,16 +1652,80 @@ async def related_test_files(file_path: str, repo_path: str) -> dict[str, Any]:
     }
 
 
+def _file_imports_python(source: str, file_path: str) -> dict[str, Any]:
+    """AST-based import extraction for Python."""
+    tree = ast.parse(source)
+
+    imports: list[str] = []
+    from_imports: list[dict[str, Any]] = []
+
+    for node in ast.iter_child_nodes(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                imports.append(alias.name)
+        elif isinstance(node, ast.ImportFrom):
+            module = node.module or ""
+            names = [alias.name for alias in node.names]
+            from_imports.append({"module": module, "names": names})
+
+    lines = source.split("\n")
+    import_section_lines = []
+    in_docstring = False
+    for line in lines:
+        stripped = line.strip()
+        if '"""' in stripped or "'''" in stripped:
+            in_docstring = not in_docstring
+            import_section_lines.append(line)
+            continue
+        if in_docstring:
+            import_section_lines.append(line)
+            continue
+        if (stripped.startswith("import ") or
+            stripped.startswith("from ") or
+            stripped.startswith("#") or
+            stripped == "" or
+            stripped.startswith("__")):
+            import_section_lines.append(line)
+        else:
+            break
+
+    return {
+        "file": str(file_path),
+        "imports": imports,
+        "from_imports": from_imports,
+        "import_section": "\n".join(import_section_lines),
+    }
+
+
+def _file_imports_generic(source: str, file_path: str, lang: LanguageProfile) -> dict[str, Any]:
+    """Regex-based import extraction for non-Python languages."""
+    lines = source.split("\n")
+    import_lines = []
+    for line in lines:
+        stripped = line.strip()
+        if any(stripped.startswith(p) for p in lang.import_line_prefixes):
+            import_lines.append(stripped)
+
+    return {
+        "file": str(file_path),
+        "imports": import_lines,
+        "from_imports": [],
+        "import_section": "\n".join(import_lines),
+    }
+
+
 async def file_imports(file_path: str, repo_path: str | None = None) -> dict[str, Any]:
     """
-    Extract import statements from a Python file.
+    Extract import statements from a source file.
+
+    Uses AST for Python, regex for other languages.
 
     Args:
-        file_path: Path to the Python file
+        file_path: Path to the source file
         repo_path: Base path for relative file paths
 
     Returns:
-        Dict with imports, from_imports, and the raw import section text
+        Dict with imports and the raw import section text
     """
     try:
         if repo_path and not Path(file_path).is_absolute():
@@ -1526,50 +1734,16 @@ async def file_imports(file_path: str, repo_path: str | None = None) -> dict[str
             full_path = Path(file_path)
 
         source = full_path.read_text()
-        tree = ast.parse(source)
 
-        imports: list[str] = []
-        from_imports: list[dict[str, Any]] = []
+        if file_path.endswith(".py"):
+            return _file_imports_python(source, file_path)
 
-        for node in ast.iter_child_nodes(tree):
-            if isinstance(node, ast.Import):
-                for alias in node.names:
-                    imports.append(alias.name)
-            elif isinstance(node, ast.ImportFrom):
-                module = node.module or ""
-                names = [alias.name for alias in node.names]
-                from_imports.append({"module": module, "names": names})
-
-        # Extract raw import section (lines until first non-import/non-comment)
-        lines = source.split("\n")
-        import_section_lines = []
-        in_docstring = False
-        for line in lines:
-            stripped = line.strip()
-            # Skip docstrings
-            if '"""' in stripped or "'''" in stripped:
-                in_docstring = not in_docstring
-                import_section_lines.append(line)
-                continue
-            if in_docstring:
-                import_section_lines.append(line)
-                continue
-            # Include imports, comments, blank lines, __future__
-            if (stripped.startswith("import ") or
-                stripped.startswith("from ") or
-                stripped.startswith("#") or
-                stripped == "" or
-                stripped.startswith("__")):
-                import_section_lines.append(line)
-            else:
-                break
-
-        return {
-            "file": str(file_path),
-            "imports": imports,
-            "from_imports": from_imports,
-            "import_section": "\n".join(import_section_lines),
-        }
+        lang = None
+        if repo_path:
+            lang = detect_language(repo_path)
+        if lang is None:
+            lang = PYTHON
+        return _file_imports_generic(source, file_path, lang)
     except FileNotFoundError:
         result: dict[str, Any] = {"error": f"File not found: {file_path}", "file": str(file_path)}
         if repo_path:
@@ -1583,24 +1757,26 @@ async def file_imports(file_path: str, repo_path: str | None = None) -> dict[str
 
 async def project_dependencies(repo_path: str) -> dict[str, Any]:
     """
-    Get project dependencies from pyproject.toml or requirements.txt.
+    Get project dependencies from language-specific config files.
+
+    Checks pyproject.toml, requirements.txt, package.json, Cargo.toml, go.mod, etc.
 
     Args:
         repo_path: Repository path
 
     Returns:
-        Dict with dependencies from pyproject.toml and/or requirements.txt
+        Dict with dependencies from the project's dependency files
     """
     try:
         result: dict[str, Any] = {"repo": repo_path}
+        found_any = False
 
-        # Check pyproject.toml
+        # Python: pyproject.toml
         pyproject_path = Path(repo_path) / "pyproject.toml"
         if pyproject_path.exists():
             content = pyproject_path.read_text()
             result["pyproject_toml"] = content
-
-            # Try to parse dependencies section
+            found_any = True
             try:
                 import tomllib
                 data = tomllib.loads(content)
@@ -1609,23 +1785,43 @@ async def project_dependencies(repo_path: str) -> dict[str, Any]:
                 result["dependencies"] = deps
                 result["optional_dependencies"] = optional_deps
             except Exception:
-                # tomllib not available or parse error, raw content is still useful
                 pass
 
-        # Check requirements.txt
-        requirements_path = Path(repo_path) / "requirements.txt"
-        if requirements_path.exists():
-            content = requirements_path.read_text()
-            result["requirements_txt"] = content
+        # Python: requirements.txt
+        for req_file in ("requirements.txt", "requirements-dev.txt"):
+            req_path = Path(repo_path) / req_file
+            if req_path.exists():
+                result[req_file.replace(".", "_").replace("-", "_")] = req_path.read_text()
+                found_any = True
 
-        # Check requirements-dev.txt
-        requirements_dev_path = Path(repo_path) / "requirements-dev.txt"
-        if requirements_dev_path.exists():
-            content = requirements_dev_path.read_text()
-            result["requirements_dev_txt"] = content
+        # JS/TS: package.json
+        pkg_path = Path(repo_path) / "package.json"
+        if pkg_path.exists():
+            import json
+            content = pkg_path.read_text()
+            result["package_json"] = content
+            found_any = True
+            try:
+                data = json.loads(content)
+                result["dependencies"] = data.get("dependencies", {})
+                result["dev_dependencies"] = data.get("devDependencies", {})
+            except Exception:
+                pass
 
-        if "pyproject_toml" not in result and "requirements_txt" not in result:
-            result["error"] = "No pyproject.toml or requirements.txt found"
+        # Rust: Cargo.toml
+        cargo_path = Path(repo_path) / "Cargo.toml"
+        if cargo_path.exists():
+            result["cargo_toml"] = cargo_path.read_text()
+            found_any = True
+
+        # Go: go.mod
+        gomod_path = Path(repo_path) / "go.mod"
+        if gomod_path.exists():
+            result["go_mod"] = gomod_path.read_text()
+            found_any = True
+
+        if not found_any:
+            result["error"] = "No dependency files found"
 
         return result
     except Exception as e:
@@ -1664,6 +1860,8 @@ async def class_hierarchy(
         >>> result["base_init_signatures"]["BaseClient"]
         'def __init__(self, host: str, port: int = 443)'
     """
+    if not file_path.endswith(".py"):
+        return {"error": "class_hierarchy requires a Python file", "class": class_name, "file": str(file_path)}
     try:
         if not Path(file_path).is_absolute():
             full_path = Path(repo_path) / file_path
@@ -1821,6 +2019,7 @@ async def symbol_migration(
     old_name: str,
     new_name: str | None = None,
     repo_path: str = "",
+    lang: LanguageProfile | None = None,
 ) -> dict[str, Any]:
     """Check whether a symbol rename has been completed across the repo.
 
@@ -1833,6 +2032,7 @@ async def symbol_migration(
         new_name: The new symbol name (optional). If provided, its usages are
             also returned so the reviewer can compare adoption.
         repo_path: Repository root to search in.
+        lang: Language profile for file filtering.
 
     Returns:
         Dict with ``old_name_usages``, ``new_name_usages`` (if *new_name*
@@ -1851,11 +2051,12 @@ async def symbol_migration(
     if not repo_path:
         return {"error": "repo_path is required"}
 
+    lang = lang or detect_language(repo_path)
+
     async def _grep_symbol(symbol: str) -> list[dict[str, Any]]:
-        # Use word-boundary matching to avoid substring false positives
-        # (e.g. searching "Client" shouldn't match "ClientFactory")
+        grep_cmd = ["grep", "-wrn"] + lang.grep_include_args() + [symbol, repo_path]
         proc = await asyncio.create_subprocess_exec(
-            "grep", "-wrn", "--include=*.py", symbol, repo_path,
+            *grep_cmd,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
@@ -1943,6 +2144,8 @@ async def generator_info(
         >>> result["yield_count"]
         3
     """
+    if not file_path.endswith(".py"):
+        return {"error": "generator_info requires a Python file", "function": function_name, "file": str(file_path)}
     try:
         if repo_path and not Path(file_path).is_absolute():
             full_path = Path(repo_path) / file_path

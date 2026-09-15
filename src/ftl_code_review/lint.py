@@ -4,6 +4,8 @@ import subprocess
 import sys
 from dataclasses import dataclass
 
+from .language import LanguageProfile, PYTHON, detect_language
+
 
 @dataclass
 class LintResult:
@@ -268,19 +270,23 @@ def run_lint_fixes(paths: list[str], cwd: str | None = None) -> FixResult:
     )
 
 
-def get_changed_python_files(
-    ref: str | None = None, base: str | None = None, cwd: str | None = None
+def get_changed_source_files(
+    ref: str | None = None,
+    base: str | None = None,
+    cwd: str | None = None,
+    lang: LanguageProfile | None = None,
 ) -> list[str]:
     """
-    Get list of changed Python files from git diff.
+    Get list of changed source files from git diff.
 
     Args:
         ref: Branch or commit to diff. If None, uses staged changes.
         base: Base branch to diff against (default: main)
         cwd: Working directory to run git in (default: current directory)
+        lang: Language profile for file filtering (default: auto-detect)
 
     Returns:
-        List of changed .py file paths
+        List of changed source file paths
     """
     if ref is None:
         cmd = ["git", "diff", "--staged", "--name-only", "--diff-filter=ACMR"]
@@ -293,8 +299,15 @@ def get_changed_python_files(
     if result.returncode != 0:
         return []
 
-    files = [f for f in result.stdout.strip().split("\n") if f and f.endswith(".py")]
-    return files
+    lang = lang or detect_language(cwd or ".")
+    all_files = [f for f in result.stdout.strip().split("\n") if f]
+    return [f for f in all_files if lang.matches_extension(f)]
+
+
+def get_changed_python_files(
+    ref: str | None = None, base: str | None = None, cwd: str | None = None
+) -> list[str]:
+    return get_changed_source_files(ref=ref, base=base, cwd=cwd, lang=PYTHON)
 
 
 @dataclass
@@ -318,17 +331,19 @@ def check_test_discoverability(
     changed_files: list[str],
     repo_path: str,
     new_files_only: bool = True,
+    lang: LanguageProfile | None = None,
 ) -> TestDiscoverabilityResult:
-    """Check that test files match pytest discovery paths and conventions.
+    """Check that test files match discovery paths and conventions.
 
-    Examines changed (or new) test files to verify they'll be found by pytest,
-    and flags anti-patterns like ``sys.path.insert``.
+    Examines changed (or new) test files to verify they'll be found by the
+    test runner, and flags anti-patterns like ``sys.path.insert``.
 
     Args:
         changed_files: List of changed file paths (relative to repo_path).
         repo_path: Repository root path.
         new_files_only: If True, only check newly added files (via git status).
             If False, check all changed test files.
+        lang: Language profile for test file identification.
 
     Returns:
         TestDiscoverabilityResult with any warnings found.
@@ -340,15 +355,13 @@ def check_test_discoverability(
         True
     """
     from pathlib import Path
+    from .observations import is_test_file
 
+    lang = lang or detect_language(repo_path)
     warnings: list[str] = []
     repo = Path(repo_path)
 
-    # Identify test files among changed files
-    test_files = [
-        f for f in changed_files
-        if Path(f).name.startswith("test_") or f.endswith("_test.py")
-    ]
+    test_files = [f for f in changed_files if is_test_file(f, lang)]
 
     if not test_files:
         return TestDiscoverabilityResult(warnings=[])

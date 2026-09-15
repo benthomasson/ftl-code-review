@@ -18,20 +18,20 @@ Do NOT render verdicts yet. Only request observations.
 | Tool | Purpose | When to use |
 |------|---------|-------------|
 | `exception_hierarchy` | Show exception MRO and subclasses | Retry logic, exception handling |
-| `raises_analysis` | What exceptions a function raises | New function calls, error paths |
-| `call_graph` | What a function calls | Impact analysis |
+| `raises_analysis` | What exceptions a function raises (Python only) | New function calls, error paths |
+| `call_graph` | What a function calls (Python only) | Impact analysis |
 | `find_usages` | Where a symbol is used (with prod/test split) | Quick integration lookup |
 | `find_callers` | Caller analysis with prod/test split and calling context | Method signature changes, return type changes, constructor modifications, integration verification |
 | `test_coverage` | Find tests for a file (uses coverage-map if available) | Test coverage claims |
 | `coverage_map_tests` | Find tests covering a file (from coverage-map.json) | Precise test coverage from actual execution |
 | `coverage_map_files` | Find files covered by tests matching a pattern | Impact analysis for test changes |
-| `function_body` | Full source of a function/method | Need complete function context beyond diff hunks |
-| `file_imports` | Extract imports from a file | Verify import changes, check dependencies |
-| `project_dependencies` | Get pyproject.toml/requirements.txt | Verify new imports have dependencies |
+| `function_body` | Full source of a function/method (all languages) | Need complete function context beyond diff hunks |
+| `file_imports` | Extract imports from a file (all languages) | Verify import changes, check dependencies |
+| `project_dependencies` | Get dependency files (pyproject.toml, package.json, etc.) | Verify new imports have dependencies |
 | `related_test_files` | Find test files for a source file | Discover tests by naming, imports, and coverage map |
-| `class_hierarchy` | Show base classes and their `__init__` signatures | Class changes its parent, modifies `__init__`, or uses `super()` |
+| `class_hierarchy` | Show base classes and their `__init__` signatures (Python only) | Class changes its parent, modifies `__init__`, or uses `super()` |
 | `symbol_migration` | Check if a rename is complete across the repo | Symbol renamed in diff — verify old name is fully removed |
-| `generator_info` | Report whether a function uses `yield` | Function might be a generator — affects return value semantics |
+| `generator_info` | Report whether a function uses `yield` (Python only) | Function might be a generator — affects return value semantics |
 | `reasons_search` | Search beliefs in reasons.db knowledge base | Find verified claims about the codebase — architecture, invariants, known bugs |
 
 ## What to Look For
