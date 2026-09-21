@@ -20,23 +20,27 @@ def format_model_review(review: ModelReview) -> str:
         "",
     ]
 
-    for change in review.changes:
-        lines.append(f"### {change.change_id}")
-        lines.append(f"**Verdict:** {change.verdict.value}")
-
-        if change.correctness:
-            lines.append(f"**Correctness:** {change.correctness.value}")
-        if change.spec_compliance:
-            lines.append(f"**Spec Compliance:** {change.spec_compliance.value}")
-        if change.test_coverage:
-            lines.append(f"**Test Coverage:** {change.test_coverage.value}")
-        if change.integration:
-            lines.append(f"**Integration:** {change.integration.value}")
-
-        if change.reasoning:
-            lines.append(f"\n{change.reasoning}")
-
+    if not review.changes and review.raw_response:
+        lines.append(review.raw_response.strip())
         lines.append("")
+    else:
+        for change in review.changes:
+            lines.append(f"### {change.change_id}")
+            lines.append(f"**Verdict:** {change.verdict.value}")
+
+            if change.correctness:
+                lines.append(f"**Correctness:** {change.correctness.value}")
+            if change.spec_compliance:
+                lines.append(f"**Spec Compliance:** {change.spec_compliance.value}")
+            if change.test_coverage:
+                lines.append(f"**Test Coverage:** {change.test_coverage.value}")
+            if change.integration:
+                lines.append(f"**Integration:** {change.integration.value}")
+
+            if change.reasoning:
+                lines.append(f"\n{change.reasoning}")
+
+            lines.append("")
 
     # Add self-review section if present
     if review.self_review:
