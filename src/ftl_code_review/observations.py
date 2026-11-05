@@ -345,6 +345,71 @@ async def call_graph(file_path: str, function_name: str, repo_path: str | None =
         return {"error": str(e), "function": function_name}
 
 
+def _infer_package_dirs(repo_path: str) -> list[str]:
+    """Infer top-level package directories for narrowed grep retries.
+
+    Returns subdirectories that are likely code packages (contain source
+    files but aren't hidden or node_modules).
+    """
+    dirs: list[str] = []
+    repo = Path(repo_path)
+    for child in sorted(repo.iterdir()):
+        if not child.is_dir():
+            continue
+        name = child.name
+        if name.startswith(".") or name in ("node_modules", "__pycache__", "dist", "build", ".git"):
+            continue
+        dirs.append(str(child))
+    return dirs
+
+
+async def _grep_with_retry(
+    grep_args: list[str],
+    repo_path: str,
+    timeout: int = 30,
+) -> tuple[bytes, bool]:
+    """Run grep, retrying with narrower scope on timeout.
+
+    On timeout, retries grep in each top-level package directory and
+    merges the results.
+
+    Returns (stdout_bytes, was_retried).
+    """
+    proc = await asyncio.create_subprocess_exec(
+        *grep_args,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    try:
+        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+        return stdout, False
+    except asyncio.TimeoutError:
+        proc.kill()
+
+    # Retry with narrower scope: replace the repo_path arg with each package dir
+    pkg_dirs = _infer_package_dirs(repo_path)
+    if not pkg_dirs:
+        return b"", True
+
+    all_output: list[bytes] = []
+    for pkg_dir in pkg_dirs:
+        narrowed = [a if a != repo_path else pkg_dir for a in grep_args]
+        proc = await asyncio.create_subprocess_exec(
+            *narrowed,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        try:
+            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+            if stdout:
+                all_output.append(stdout)
+        except asyncio.TimeoutError:
+            proc.kill()
+            continue
+
+    return b"\n".join(all_output), True
+
+
 async def find_usages(symbol: str, repo_path: str, lang: LanguageProfile | None = None) -> dict[str, Any]:
     """
     Find usages of a symbol in the codebase.
@@ -360,16 +425,7 @@ async def find_usages(symbol: str, repo_path: str, lang: LanguageProfile | None 
     try:
         lang = lang or detect_language(repo_path)
         grep_cmd = ["grep", "-Frn"] + lang.grep_include_args() + [symbol, repo_path]
-        proc = await asyncio.create_subprocess_exec(
-            *grep_cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        try:
-            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=30)
-        except asyncio.TimeoutError:
-            proc.kill()
-            return {"error": "grep timed out", "symbol": symbol}
+        stdout, was_retried = await _grep_with_retry(grep_cmd, repo_path)
 
         usages = []
         production_usages = []
@@ -379,6 +435,8 @@ async def find_usages(symbol: str, repo_path: str, lang: LanguageProfile | None 
                 parts = line.split(":", 2)
                 if len(parts) >= 3:
                     rel_file = parts[0].replace(repo_path + "/", "")
+                    for pkg_dir in _infer_package_dirs(repo_path) if was_retried else []:
+                        rel_file = rel_file.replace(pkg_dir + "/", "")
                     entry = {
                         "file": rel_file,
                         "line": int(parts[1]),
@@ -390,15 +448,18 @@ async def find_usages(symbol: str, repo_path: str, lang: LanguageProfile | None 
                     else:
                         production_usages.append(entry)
 
-        return {
+        result: dict[str, Any] = {
             "symbol": symbol,
-            "usages": usages[:30],  # Limit results (backward compat)
+            "usages": usages[:30],
             "production_usages": production_usages[:30],
             "test_usages": test_usages[:30],
             "production_count": len(production_usages),
             "test_count": len(test_usages),
             "total_count": len(usages),
         }
+        if was_retried:
+            result["note"] = "grep timed out on full repo; retried per-package"
+        return result
     except Exception as e:
         return {"error": str(e), "symbol": symbol}
 
@@ -484,16 +545,7 @@ async def find_callers(
     try:
         lang = lang or detect_language(repo_path)
         grep_cmd = ["grep", "-Frn"] + lang.grep_include_args() + [symbol, repo_path]
-        proc = await asyncio.create_subprocess_exec(
-            *grep_cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        try:
-            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=30)
-        except asyncio.TimeoutError:
-            proc.kill()
-            return {"error": "grep timed out", "symbol": symbol}
+        stdout, was_retried = await _grep_with_retry(grep_cmd, repo_path)
 
         production_callers: list[dict[str, Any]] = []
         test_callers: list[dict[str, Any]] = []
@@ -544,7 +596,7 @@ async def find_callers(
             else:
                 production_callers.append(entry)
 
-        return {
+        result: dict[str, Any] = {
             "symbol": symbol,
             "production_callers": production_callers[:30],
             "test_callers": test_callers[:30],
@@ -552,6 +604,9 @@ async def find_callers(
             "test_count": len(test_callers),
             "total_count": len(production_callers) + len(test_callers),
         }
+        if was_retried:
+            result["note"] = "grep timed out on full repo; retried per-package"
+        return result
     except Exception as e:
         return {"error": str(e), "symbol": symbol}
 
@@ -970,6 +1025,168 @@ async def function_body(
         return {"error": f"Syntax error parsing {file_path}: {e}", "file": str(file_path)}
     except Exception as e:
         return {"error": str(e), "file": str(file_path)}
+
+
+_TYPE_DEF_PATTERNS = [
+    _re.compile(r"^\s*(?:export\s+)?(?:type|interface|enum)\s+(\w+)"),
+    _re.compile(r"^\s*(?:export\s+)?class\s+(\w+)"),
+    _re.compile(r"^\s*(?:export\s+)?const\s+(\w+)\s*[:=]"),
+]
+
+_PY_TYPE_DEF_PATTERNS = [
+    _re.compile(r"^\s*class\s+(\w+)"),
+    _re.compile(r"^(\w+)\s*=\s*(?:TypeVar|NewType|TypeAlias|NamedTuple)"),
+    _re.compile(r"^class\s+(\w+)\s*\(.*(?:TypedDict|NamedTuple|Enum|StrEnum|IntEnum)"),
+]
+
+
+async def type_definition(
+    type_name: str,
+    repo_path: str,
+    file_path: str | None = None,
+    lang: LanguageProfile | None = None,
+) -> dict[str, Any]:
+    """Find and extract a type/interface/enum/class definition by name.
+
+    Searches for type definitions (TypeScript interfaces, enums, type
+    aliases; Python TypedDicts, dataclasses, Pydantic models) and returns
+    the full source. If *file_path* is given, searches that file first.
+
+    Args:
+        type_name: Name of the type to find (e.g. ``"EdgeConnection"``).
+        repo_path: Repository root for searching.
+        file_path: Optional file to search first before grepping the repo.
+        lang: Language profile for file filtering.
+
+    Returns:
+        Dict with ``type_name``, ``file``, ``start_line``, ``end_line``,
+        and ``source`` of the definition. On error, a dict with ``error``.
+    """
+    lang = lang or detect_language(repo_path)
+
+    # If file_path given, try there first
+    candidates: list[Path] = []
+    if file_path:
+        p = Path(repo_path) / file_path if not Path(file_path).is_absolute() else Path(file_path)
+        if p.exists():
+            candidates.append(p)
+
+    # grep the repo for the type name to find its definition file
+    # Search all common source file types, not just the detected language
+    if not candidates:
+        grep_patterns = [
+            f"interface {type_name}",
+            f"type {type_name}",
+            f"enum {type_name}",
+            f"class {type_name}",
+            f"const {type_name}",
+        ]
+        type_includes = [
+            "--include=*.py", "--include=*.ts", "--include=*.tsx",
+            "--include=*.js", "--include=*.jsx",
+        ]
+        grep_cmd = (
+            ["grep", "-rn", "--max-count=5"]
+            + type_includes
+            + ["-E", "|".join(grep_patterns), repo_path]
+        )
+        stdout, _ = await _grep_with_retry(grep_cmd, repo_path)
+
+        seen_files: set[str] = set()
+        for line in stdout.decode().strip().split("\n"):
+            if not line or ":" not in line:
+                continue
+            fpath = line.split(":", 1)[0]
+            if fpath not in seen_files:
+                seen_files.add(fpath)
+                p = Path(fpath)
+                if p.exists():
+                    candidates.append(p)
+
+    if not candidates:
+        return {"error": f"Type '{type_name}' not found in repo", "type_name": type_name}
+
+    # Search each candidate file for the definition and extract it
+    for candidate in candidates[:5]:
+        try:
+            source = candidate.read_text()
+        except Exception:
+            continue
+
+        source_lines = source.splitlines()
+        rel_path = str(candidate.relative_to(repo_path)) if str(candidate).startswith(repo_path) else str(candidate)
+
+        # For Python files, use AST
+        if str(candidate).endswith(".py"):
+            try:
+                tree = ast.parse(source)
+                for node in ast.walk(tree):
+                    if isinstance(node, ast.ClassDef) and node.name == type_name:
+                        start = node.lineno
+                        if node.decorator_list:
+                            start = node.decorator_list[0].lineno
+                        end = node.end_lineno or start
+                        max_lines = 200
+                        body = source_lines[start - 1 : end]
+                        truncated = len(body) > max_lines
+                        if truncated:
+                            body = body[:max_lines]
+                        result: dict[str, Any] = {
+                            "type_name": type_name,
+                            "file": rel_path,
+                            "start_line": start,
+                            "end_line": end,
+                            "source": "\n".join(body),
+                        }
+                        if truncated:
+                            result["truncated"] = True
+                        return result
+            except Exception:
+                pass
+            continue
+
+        # For TS/JS, use brace counting
+        pat = _re.compile(r"\b" + _re.escape(type_name) + r"\b")
+        for i, line in enumerate(source_lines):
+            if not pat.search(line):
+                continue
+            if not any(p.match(line) for p in _TYPE_DEF_PATTERNS):
+                continue
+
+            # Found it — extract with brace counting
+            brace_depth = 0
+            found_open = False
+            end_idx = i
+
+            for j in range(i, len(source_lines)):
+                for ch in source_lines[j]:
+                    if ch == "{":
+                        brace_depth += 1
+                        found_open = True
+                    elif ch == "}":
+                        brace_depth -= 1
+                end_idx = j
+                if found_open and brace_depth <= 0:
+                    break
+
+            max_lines = 200
+            body = source_lines[i : end_idx + 1]
+            truncated = len(body) > max_lines
+            if truncated:
+                body = body[:max_lines]
+
+            result = {
+                "type_name": type_name,
+                "file": rel_path,
+                "start_line": i + 1,
+                "end_line": end_idx + 1,
+                "source": "\n".join(body),
+            }
+            if truncated:
+                result["truncated"] = True
+            return result
+
+    return {"error": f"Type '{type_name}' definition not found in searched files", "type_name": type_name}
 
 
 async def gather_function_context(
@@ -2055,16 +2272,7 @@ async def symbol_migration(
 
     async def _grep_symbol(symbol: str) -> list[dict[str, Any]]:
         grep_cmd = ["grep", "-wrn"] + lang.grep_include_args() + [symbol, repo_path]
-        proc = await asyncio.create_subprocess_exec(
-            *grep_cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        try:
-            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=30)
-        except asyncio.TimeoutError:
-            proc.kill()
-            return []
+        stdout, _ = await _grep_with_retry(grep_cmd, repo_path)
 
         usages: list[dict[str, Any]] = []
         for line in stdout.decode().strip().split("\n"):
@@ -2499,6 +2707,7 @@ OBSERVATION_TOOLS: dict[str, Any] = {
     "symbol_migration": symbol_migration,
     "generator_info": generator_info,
     "reasons_search": reasons_search,
+    "type_definition": type_definition,
 }
 
 

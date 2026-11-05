@@ -32,6 +32,7 @@ Do NOT render verdicts yet. Only request observations.
 | `class_hierarchy` | Show base classes and their `__init__` signatures (Python only) | Class changes its parent, modifies `__init__`, or uses `super()` |
 | `symbol_migration` | Check if a rename is complete across the repo | Symbol renamed in diff — verify old name is fully removed |
 | `generator_info` | Report whether a function uses `yield` (Python only) | Function might be a generator — affects return value semantics |
+| `type_definition` | Find and extract a type/interface/enum/class definition | Code references a type you can't see in the diff — verify field coverage, shape |
 | `reasons_search` | Search beliefs in reasons.db knowledge base | Find verified claims about the codebase — architecture, invariants, known bugs |
 
 ## What to Look For
@@ -43,6 +44,7 @@ Do NOT render verdicts yet. Only request observations.
 5. **Inheritance changes**: Class definition changes, new base classes, `super()` calls
 6. **Renames**: Symbols that appear to have been renamed in the diff
 7. **Factory methods**: Calls to `@classmethod` / `@staticmethod` constructors (e.g. `Result.error(...)`) — request `function_body` to see their implementation
+8. **Type references**: Code uses types/interfaces/schemas not visible in the diff — request `type_definition` to verify field coverage and shape
 
 ## Output Format
 
@@ -125,6 +127,14 @@ For a diff modifying a function that might be a generator:
 ```json
 [
   {{"name": "process_gen", "tool": "generator_info", "params": {{"file_path": "src/pipeline.py", "function_name": "process_items"}}}}
+]
+```
+
+For a diff referencing a type/interface you can't see (e.g., `EdgeConnection`, `ExecutionTargetUpdate`):
+```json
+[
+  {{"name": "edge_connection_type", "tool": "type_definition", "params": {{"type_name": "EdgeConnection"}}}},
+  {{"name": "update_schema", "tool": "type_definition", "params": {{"type_name": "ExecutionTargetUpdate"}}}}
 ]
 ```
 
