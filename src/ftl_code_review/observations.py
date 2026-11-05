@@ -2264,18 +2264,146 @@ async def reasons_search(
         return {"error": str(e), "query": query}
 
 
-async def gather_reasons_beliefs(
-    changed_files: list[str], repo_path: str, db_path: str | None = None,
-) -> dict[str, Any]:
-    """Auto-gather beliefs from reasons.db related to changed files.
+import re as _re
 
-    For each changed file, runs a semantic search to find beliefs that
-    mention it or its key symbols.
+_CONCEPT_STOP_WORDS = frozenset({
+    "self", "cls", "args", "kwargs", "return", "import", "from", "None",
+    "True", "False", "str", "int", "float", "bool", "list", "dict", "set",
+    "tuple", "Any", "Optional", "Union", "Type", "Callable",
+    "if", "else", "elif", "for", "while", "try", "except", "finally",
+    "with", "as", "in", "not", "and", "or", "is", "def", "class",
+    "const", "let", "var", "function", "new", "this", "null", "undefined",
+    "string", "number", "boolean", "void", "export", "default", "type",
+    "interface", "enum", "extends", "implements", "typeof", "instanceof",
+    "async", "await", "yield", "pass", "raise", "break", "continue",
+    "describe", "it", "expect", "test", "beforeEach", "afterEach",
+})
+
+_PY_DEF_RE = _re.compile(r"^[+]\s*(?:async\s+)?def\s+(\w+)")
+_PY_CLASS_RE = _re.compile(r"^[+]\s*class\s+(\w+)")
+_PY_IMPORT_RE = _re.compile(r"^[+]\s*(?:from\s+([\w.]+)\s+)?import\s+(.+)")
+_TS_FUNC_RE = _re.compile(r"^[+]\s*(?:export\s+)?(?:async\s+)?function\s+(\w+)")
+_TS_CONST_FUNC_RE = _re.compile(r"^[+]\s*(?:export\s+)?const\s+(\w+)\s*=")
+_TS_TYPE_RE = _re.compile(r"^[+]\s*(?:export\s+)?(?:type|interface|enum|class)\s+(\w+)")
+_TS_IMPORT_RE = _re.compile(r"^[+]\s*import\s+(?:type\s+)?(?:\{([^}]+)\}|(\w+))\s+from")
+_CAMEL_SPLIT_RE = _re.compile(r"(?<=[a-z])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])")
+
+
+def extract_concepts_from_diff(diff_content: str) -> set[str]:
+    """Extract meaningful concepts from diff added/modified lines.
+
+    Parses function names, class names, type definitions, import paths,
+    and significant identifiers from ``+`` lines in a unified diff.
+    Splits camelCase and PascalCase into component words for better
+    belief search matching.
+
+    Returns a set of search-worthy concept strings (lowercased).
+    """
+    concepts: set[str] = set()
+
+    for line in diff_content.split("\n"):
+        if not line.startswith("+") or line.startswith("+++"):
+            continue
+
+        # Python definitions
+        m = _PY_DEF_RE.match(line)
+        if m:
+            _add_identifier(m.group(1), concepts)
+            continue
+        m = _PY_CLASS_RE.match(line)
+        if m:
+            _add_identifier(m.group(1), concepts)
+            continue
+
+        # TypeScript/JavaScript definitions (check before Python imports
+        # since `import { ... } from '...'` would false-match the Python regex)
+        m = _TS_IMPORT_RE.match(line)
+        if m:
+            names = m.group(1) or m.group(2) or ""
+            for name in names.split(","):
+                name = name.strip().split(" as ")[0].strip()
+                if name.startswith("type "):
+                    name = name[5:].strip()
+                _add_identifier(name, concepts)
+            continue
+        m = _TS_FUNC_RE.match(line)
+        if m:
+            _add_identifier(m.group(1), concepts)
+            continue
+        m = _TS_TYPE_RE.match(line)
+        if m:
+            _add_identifier(m.group(1), concepts)
+            continue
+        m = _TS_CONST_FUNC_RE.match(line)
+        if m:
+            _add_identifier(m.group(1), concepts)
+            continue
+
+        # Python imports
+        m = _PY_IMPORT_RE.match(line)
+        if m:
+            module = m.group(1)
+            names = m.group(2)
+            if module:
+                parts = module.split(".")
+                for part in parts:
+                    _add_identifier(part, concepts)
+            if names:
+                for name in names.split(","):
+                    name = name.strip().split(" as ")[0].strip()
+                    _add_identifier(name, concepts)
+            continue
+
+    return concepts
+
+
+def _add_identifier(name: str, concepts: set[str]) -> None:
+    """Add an identifier and its component words to the concept set."""
+    name = name.strip("_()")
+    if not name or len(name) < 3 or name in _CONCEPT_STOP_WORDS:
+        return
+
+    # Split camelCase/PascalCase before lowercasing
+    camel_parts = _CAMEL_SPLIT_RE.split(name)
+    # Also split on underscores/hyphens
+    all_parts: list[str] = []
+    for part in camel_parts:
+        all_parts.extend(part.replace("_", " ").replace("-", " ").split())
+
+    words = [w.lower() for w in all_parts if len(w) >= 2]
+
+    if not words:
+        return
+
+    # Add the full compound (keeps short words like "type" in context)
+    full = " ".join(words)
+    if len(full) >= 5:
+        concepts.add(full)
+
+    # Also add with stop words removed for broader matching
+    filtered = [w for w in words if len(w) >= 3 and w not in _CONCEPT_STOP_WORDS]
+    if filtered and filtered != words:
+        concepts.add(" ".join(filtered))
+
+
+async def gather_reasons_beliefs(
+    changed_files: list[str],
+    repo_path: str,
+    db_path: str | None = None,
+    diff_content: str | None = None,
+) -> dict[str, Any]:
+    """Auto-gather beliefs from reasons.db related to changed files and concepts.
+
+    Runs two types of searches:
+    1. **File-based**: For each changed file, search by file path and stem.
+    2. **Concept-based**: Extract function names, class names, type definitions,
+       and import paths from the diff and search for beliefs mentioning them.
 
     Args:
         changed_files: List of changed file paths (relative to repo).
         repo_path: Repository root (used as cwd for searches).
         db_path: Explicit path to reasons.db (default: repo_path/reasons.db).
+        diff_content: Raw unified diff content for concept extraction.
 
     Returns:
         Dict mapping descriptive keys to search results.
@@ -2299,29 +2427,55 @@ async def gather_reasons_beliefs(
     results: dict[str, Any] = {}
     tasks: list[tuple[str, asyncio.Task]] = []
 
+    # File-based searches
     for file_path in changed_files:
         stem = Path(file_path).stem
         query = file_path if stem in generic_stems else f"{file_path} {stem}"
         tasks.append((
-            file_path,
+            f"beliefs:{file_path}",
             asyncio.ensure_future(
                 reasons_search(query, repo_path, db_path=resolved_db)
             ),
         ))
+
+    # Concept-based searches (multi-word concepts only — single words
+    # like "activity" or "errors" match too many beliefs to be useful)
+    if diff_content:
+        concepts = extract_concepts_from_diff(diff_content)
+        seen_queries: set[str] = set()
+        for concept in sorted(concepts):
+            if " " not in concept:
+                continue
+            if concept in seen_queries:
+                continue
+            seen_queries.add(concept)
+            tasks.append((
+                f"beliefs:concept:{concept}",
+                asyncio.ensure_future(
+                    reasons_search(concept, repo_path, db_path=resolved_db)
+                ),
+            ))
 
     if not tasks:
         return results
 
     awaited = await asyncio.gather(*(t for _, t in tasks), return_exceptions=True)
 
-    for (file_path, _), result in zip(tasks, awaited):
+    seen_results: set[str] = set()
+    for (key, _), result in zip(tasks, awaited):
         if isinstance(result, Exception):
             continue
         if "error" in result:
             continue
         search_results = result.get("results", "")
-        if search_results.strip():
-            results[f"beliefs:{file_path}"] = result
+        if not search_results.strip():
+            continue
+        # Deduplicate identical result sets from different queries
+        result_hash = hash(search_results)
+        if result_hash in seen_results:
+            continue
+        seen_results.add(result_hash)
+        results[key] = result
 
     return results
 
