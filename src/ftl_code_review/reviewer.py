@@ -33,7 +33,7 @@ OPENAI_API_URL = "https://api.openai.com/v1/chat/completions"
 OPENAI_MODEL = "gpt-4o-mini"
 
 # Default timeout for model invocation (5 minutes)
-DEFAULT_TIMEOUT = 300
+DEFAULT_TIMEOUT = 600
 
 
 def _model_provider(model: str) -> tuple[str, str | None]:
@@ -136,7 +136,7 @@ async def _run_openai(prompt: str, timeout: int, model_name: str | None = None) 
         try:
             value = request_api()
         except BaseException as error:
-            callback = lambda: set_result(error=error)
+            callback = lambda e=error: set_result(error=e)
         else:
             callback = lambda: set_result(value=value)
         try:
