@@ -124,6 +124,12 @@ def cli():
     help="Path to beliefs.md file for belief-aware review (from code-expert)",
 )
 @click.option(
+    "--reasons-db",
+    type=click.Path(exists=True),
+    default=None,
+    help="Path to reasons.db for belief-aware review (auto-detected in repo root if not set)",
+)
+@click.option(
     "--issue",
     type=click.Path(exists=True),
     default=None,
@@ -146,7 +152,7 @@ def cli():
     default=None,
     help="Timeout in seconds per model invocation (default: 300)",
 )
-def review(branch, base, pr, repo, spec, model, output, output_dir, observations, beliefs, issue, github_issue, comment, timeout):
+def review(branch, base, pr, repo, spec, model, output, output_dir, observations, beliefs, reasons_db, issue, github_issue, comment, timeout):
     """Run code review with multiple models."""
     import os
 
@@ -218,6 +224,30 @@ def review(branch, base, pr, repo, spec, model, output, output_dir, observations
             click.echo(f"Loaded beliefs from {beliefs} ({kept}/{total} relevant)", err=True)
         else:
             click.echo(f"Warning: Could not read beliefs file: {beliefs}", err=True)
+
+    # Auto-gather beliefs from reasons.db for changed files
+    abs_repo = os.path.abspath(repo)
+    resolved_db = None
+    if reasons_db:
+        resolved_db = os.path.abspath(reasons_db)
+    elif (Path(abs_repo) / "reasons.db").exists():
+        resolved_db = os.path.join(abs_repo, "reasons.db")
+    if resolved_db:
+        click.echo(f"Auto-gathering beliefs from {resolved_db}...", err=True)
+        changed_files = extract_changed_files(diff_content)
+        reasons_obs = asyncio.run(gather_reasons_beliefs(changed_files, abs_repo, db_path=resolved_db, diff_content=diff_content))
+        if reasons_obs:
+            if obs_data is None:
+                obs_data = {}
+            obs_data.update(reasons_obs)
+            click.echo(f"Found beliefs for {len(reasons_obs)} file(s):", err=True)
+            for key in reasons_obs:
+                click.echo(f"  {key}", err=True)
+            os.makedirs(output_dir, exist_ok=True)
+            with open(os.path.join(output_dir, "auto-beliefs.json"), "w") as f:
+                json.dump(reasons_obs, f, indent=2, default=str)
+        else:
+            click.echo("No relevant beliefs found in reasons.db.", err=True)
 
     # Load issue if provided
     issue_content = None
